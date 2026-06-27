@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# Local Claude Code config (preview launch config, local permissions)
+.claude/
+
+# Python relay bytecode
+__pycache__/
+*.pyc

@@ -1,0 +1,2660 @@
+// ============================================================================
+//  Ace of Sky II — battle.js
+//  THE DOGFIGHT SIMULATION. The heart of the game.
+//
+//  Responsibilities:
+//    - Build a world for config.env (day/dusk/night/sea): sky, lights, terrain,
+//      fog. Uses the shared engine (setScene / onFrame) and tears down on stop.
+//    - Spawn every aircraft (player, allies, enemies, carriers) by building a
+//      THREE.Group from its design.parts via PARTS[key].build(THREE, def),
+//      placed at partCenter() with quarter-turn Y rotation. computeStats() is
+//      cached per craft and DRIVES the entire flight model.
+//    - A real flight integrator: thrust→accel, afterburner (boostThrust, drains
+//      fuel at boostBurn), aero drag (dragForce), lift vs weight with a stall
+//      regime below stats.vStall, turn rates from stats.agility, fuel burn,
+//      thermoStep heat → overheat damage, durability HP pool, armor soak,
+//      gravity, and ground/sea collision.
+//    - Player controls: W/S throttle, mouse pitch+yaw (invertY respected),
+//      A/D roll, Shift boost, Space fire, Tab/Q/E cycle weapon, F flares,
+//      G jettison drop tanks. Chase camera with lag + shake.
+//    - Combat: guns (fast tracer projectiles), missiles (homeMissile),
+//      lockmissile (LockSystem full-lock then auto-fire), bombs (ballistic).
+//      Splash, sparks, sfx, explosions on kill.
+//    - HUD on the 2D <canvas id="hud-canvas"> + DOM bars: HP/armor, fuel,
+//      boost, heat, weapon+ammo, radar, objective, speed/alt/throttle, warnings.
+//      THE PREDICTION SYSTEM: a LockSystem instance, drawPrediction (gun lead
+//      pipper) + drawLockReticle (lockmissile) every frame.
+//    - AI from ai.js for all non-player craft.
+//    - Objectives: deathmatch / survive / escort / sink / pvp. Tracks
+//      kills/deaths/time/score, calls config.onEnd(result).
+//    - Netplay: if config.net present it's HUMAN vs HUMAN — send player state +
+//      fire events each tick, spawn the remote fleet from received design codes,
+//      drive remote craft from received transforms (NO AI), interpolate.
+// ============================================================================
+import * as THREE from 'three';
+import { clamp, lerp, dampF, $, el, show, hide, sfx, toast, fmtNum } from './util.js';
+import { computeStats, dragForce, thermoStep, partCenter, navalCruise, AMBIENT_TEMP, OVERHEAT_TEMP, RHO } from './physics.js';
+import { PARTS } from './parts.js';
+import { State, importCode, exportCode, stockGet } from './core.js';
+import { setScene, onFrame, resetView } from './engine.js';
+import {
+  LockSystem, leadPoint, homeMissile, drawPrediction, drawLockReticle,
+} from './prediction.js';
+import { initAI, updateAI, updateBomber, updateCarrierPD, pickTarget, updateSquads } from './ai.js';
+
+// ---------------------------------------------------------------------------
+//  Environment presets — sky gradient, sun, fog and surface look per env.
+// ---------------------------------------------------------------------------
+const ENVS = {
+  day:  { top: 0x4a93d6, bot: 0xbfe2ff, sun: 0xfff3da, sunInt: 1.5, hemi: 0x9fc6ff, hemiGround: 0x4a5a44, fog: 0xbfe2ff, fogNear: 1400, fogFar: 9000, sunPos: [-0.4, 0.7, 0.5], ground: 0x4a6a3a, sea: false, ambient: 0.55 },
+  dusk: { top: 0x2a2350, bot: 0xff8a4a, sun: 0xffb066, sunInt: 1.2, hemi: 0xff9a6a, hemiGround: 0x281c30, fog: 0xc66a44, fogNear: 1100, fogFar: 7500, sunPos: [-0.85, 0.18, 0.2], ground: 0x4a3a32, sea: false, ambient: 0.4 },
+  night:{ top: 0x05080f, bot: 0x0d1626, sun: 0x7088c0, sunInt: 0.45, hemi: 0x223355, hemiGround: 0x05080f, fog: 0x080d18, fogNear: 700, fogFar: 5200, sunPos: [-0.3, 0.6, 0.4], ground: 0x10161e, sea: false, ambient: 0.25, stars: true },
+  sea:  { top: 0x3f86c8, bot: 0xa9d6f5, sun: 0xfff0d0, sunInt: 1.45, hemi: 0x9fd0ff, hemiGround: 0x12506e, fog: 0xa9d6f5, fogNear: 1600, fogFar: 9500, sunPos: [-0.5, 0.6, 0.4], ground: 0x14506e, sea: true, ambient: 0.5 },
+};
+
+const DEG = Math.PI / 180;
+// sign that makes a nose-right (yaw +) demand bank the aircraft to the right too,
+// given the body-frame roll convention in integrate(). Verified empirically.
+const BANK_SIGN = -1;
+const MAX_BANK = 1.15;            // ≈66° — the bank the auto-coordinator holds at full turn demand
+const GROUND_CLEAR = 8;           // belly clearance a craft rests at on the surface (must exceed the +2 crash line)
+const SHIP_SCALE = 2;             // the PLAYER's piloted ship (a ship/carrier design flown via makeCraft) renders at
+                                  // this scale; its hitbox, water clearance and chase camera track it via scaleMul.
+const CARRIER_SCALE = SHIP_SCALE * 2.5;  // NPC ships/carriers (makeCarrier) render 2.5× the player's vessel — bigger,
+                                  // more imposing capital ships on the horizon. (= 5× true size at SHIP_SCALE 2.)
+// Naval squadrons: surface units of the SAME type (team + design) steam fast in
+// formation and screen each other from heavy ordnance (see updateFleets / damage).
+const FLEET_SCREEN = 850;         // same-type mates within this range shield each other (escort damage soak)
+// Naval battle formations, chosen by a squadron's SPEED (fast ships exploit speed to charge;
+// slow heavy ships can't, so they stand off and bombard). A follower's slot, relative to the
+// leader in the fleet HEADING frame, is leader + right·(side·rank·F.side) + forward·(rank·F.fwd):
+//   F.fwd < 0 → stationed BEHIND the leader (arrowhead);  F.fwd > 0 → AHEAD (an enveloping arc).
+//   F.standoff = the range the leader closes to before holding;  F.speedMul scales squadron cruise.
+const FORMATIONS = {
+  blitz:    { side: 80,  fwd: -130, standoff: 200,  speedMul: 1.45 },  // FAST ships: tight wedge, charge to point-blank
+  wedge:    { side: 210, fwd: -190, standoff: 560,  speedMul: 1.0 },   // MEDIUM ships: arrowhead, punch through the line
+  crescent: { side: 360, fwd: 80,   standoff: 1180, speedMul: 0.78 },  // SLOW ships: wide concave arc, bombard at range
+};
+// pick a formation by a ship's naval cruise speed (navalCruise, ≈18…95 m/s — driven by its engines):
+// fast engined ships exploit speed to charge; slow/engineless hulls stand off and bombard.
+const fleetFormation = (spd) => spd >= 55 ? 'blitz' : (spd >= 32 ? 'wedge' : 'crescent');
+const SHIP_FLOOR = 0.60;           // every ship keeps way on — never below 60% of its OWN cruise…
+const SHIP_FLOOR_BIG = 0.70;       // …and a larger (slow, crescent-class) ship never below 70%
+const FLEET_FORM_TOL = 150;        // a follower this close to its slot counts as "on station"
+const FLEET_CHARGE_MUL = 2.0;      // once the squadron is FORMED UP, it surges forward at flank (≈2× cruise)
+const SHIP_MAJOR_HIT = 250;       // damage at/above this is a "major attack" a fleet can soak
+const TMP = new THREE.Vector3(), TMP2 = new THREE.Vector3(), TMP3 = new THREE.Vector3();
+const _R = new THREE.Vector3(), _ACC = new THREE.Vector3();
+const QTMP = new THREE.Quaternion();
+// scratch for the auto-turret traverse/aim math (kept separate from the flight TMPs)
+const _TV = new THREE.Vector3(), _TV2 = new THREE.Vector3(), _TV3 = new THREE.Vector3();
+const _TQ = new THREE.Quaternion(), _TQ2 = new THREE.Quaternion();
+const _ZAXIS = new THREE.Vector3(0, 0, 1);
+const _HD = new THREE.Vector3();   // scratch: fleet heading for formation station-keeping
+
+// Animate the open-ocean surface: three travelling swell components at different
+// headings/speeds (a living sea instead of a flat, icy plane). Heights stay small
+// vs the play scale, so the +8 m float clearance keeps the collision feel intact.
+function updateSeaGeo(geo, base, t){
+  const pa = geo.attributes.position, na = geo.attributes.normal;
+  const a = 0.0042, b = 0.0056, c = 0.011;
+  for (let i = 0; i < pa.count; i++){
+    const x = base[i * 2], z = base[i * 2 + 1];
+    const px = x * a + t * 0.55, pz = z * b + t * 0.43, pd = (x + z) * c + t * 0.95;
+    const cosD = Math.cos(pd);
+    pa.setY(i, Math.sin(px) * 3.4 + Math.cos(pz) * 2.7 + Math.sin(pd) * 1.2);
+    // ANALYTIC surface normal from the wave slope. This replaces geo.computeVertexNormals(),
+    // which re-walked all ~50k faces every frame and was the single biggest cost in the sim
+    // (≈8 ms/frame). The wave is a known function, so the normal is just (-dh/dx, 1, -dh/dz).
+    const dhdx = 3.4 * a * Math.cos(px) + 1.2 * c * cosD;
+    const dhdz = -2.7 * b * Math.sin(pz) + 1.2 * c * cosD;
+    const inv = 1 / Math.sqrt(dhdx * dhdx + 1 + dhdz * dhdz);
+    na.setXYZ(i, -dhdx * inv, inv, -dhdz * inv);
+  }
+  pa.needsUpdate = true;
+  na.needsUpdate = true;
+}
+const _turretLead = new THREE.Vector3();
+
+// ===========================================================================
+//  Build an aircraft mesh Group from a design (parts placed by partCenter)
+// ===========================================================================
+function buildAircraftMesh(design){
+  const group = new THREE.Group();
+  const parts = (design && design.parts) || [];
+  let cx = 0, cy = 0, cz = 0, n = 0;
+  const dropTanks = [];     // meshes that can be jettisoned
+  for (const p of parts){
+    const def = PARTS[p.key];
+    if (!def || !def.build) continue;
+    let obj;
+    try { obj = def.build(THREE, def); } catch (e){ continue; }
+    const c = partCenter(p, def);
+    obj.position.set(c.x, c.y, c.z);
+    // Orient EXACTLY as the hangar editor does (addPartMesh): all three quarter-turn axes
+    // — pitch (rx), yaw (rot), roll (rz) — negated, in 'YXZ' order. The old code applied
+    // only +yaw, so any pitch/roll you set in the hangar (and even yaw, mirrored) was lost.
+    obj.rotation.set(-(p.rx || 0) * Math.PI / 2, -(p.rot || 0) * Math.PI / 2, -(p.rz || 0) * Math.PI / 2, 'YXZ');
+    obj.userData.partKey = p.key;
+    if (def.jettison) dropTanks.push(obj);
+    obj.traverse(o => { if (o.isMesh){ o.castShadow = true; o.receiveShadow = false; } });
+    group.add(obj);
+    cx += c.x; cy += c.y; cz += c.z; n++;
+  }
+  // re-centre the group on its part centroid so it rotates about its middle
+  const off = n ? { x: cx / n, y: cy / n, z: cz / n } : { x: 0, y: 0, z: 0 };
+  for (const ch of group.children) ch.position.sub(new THREE.Vector3(off.x, off.y, off.z));
+  // Livery — recolour the airframe to the design colour. MUST match the hangar editor's
+  // applyLivery() so what you paint is what you fly: livery everything EXCEPT functional
+  // parts (engines, thrusters, weapons, power) and glow/transparent bits. Resolve the
+  // category from each TOP-LEVEL part node (which carries the partKey) and colour all of
+  // its descendants — checking only a mesh's own/parent partKey misses deeply-nested bits
+  // (a jet's nozzle sub-meshes, a missile's body) and wrongly paints them.
+  if (design && design.color){
+    const col = new THREE.Color(design.color);
+    for (const partNode of group.children){
+      const k = partNode.userData && partNode.userData.partKey;
+      const cat = k ? PARTS[k]?.category : '';
+      if (cat === 'engine' || cat === 'thruster' || cat === 'gun' || cat === 'missile' || cat === 'bomb' || cat === 'power') continue;
+      partNode.traverse(o => {
+        if (!o.isMesh || !o.material || !o.material.color || o.userData.glow || o.material.transparent) return;
+        o.material = o.material.clone();
+        o.material.color.copy(col);
+      });
+    }
+  }
+  group.userData.dropTanks = dropTanks;
+  return group;
+}
+
+// big slab "carrier" mesh (when no carrier design is supplied) ---------------
+function buildCarrierMesh(design, isSea){
+  if (design && design.parts && design.parts.length){
+    const g = buildAircraftMesh(design);
+    g.scale.setScalar(CARRIER_SCALE);   // NPC ships render bigger than the player's vessel
+    return g;
+  }
+  // default carrier: a long deck on a hull
+  const g = new THREE.Group();
+  const hull = new THREE.Mesh(new THREE.BoxGeometry(60, 26, 280), new THREE.MeshStandardMaterial({ color: 0x46505a, metalness: 0.6, roughness: 0.6 }));
+  hull.position.y = -8; hull.castShadow = true; g.add(hull);
+  const deck = new THREE.Mesh(new THREE.BoxGeometry(70, 4, 300), new THREE.MeshStandardMaterial({ color: 0x2a2f34, metalness: 0.3, roughness: 0.9 }));
+  deck.position.y = 6; deck.receiveShadow = true; g.add(deck);
+  // island superstructure
+  const island = new THREE.Mesh(new THREE.BoxGeometry(14, 30, 40), new THREE.MeshStandardMaterial({ color: 0x3a4046, metalness: 0.5, roughness: 0.7 }));
+  island.position.set(26, 23, -40); island.castShadow = true; g.add(island);
+  // deck centre stripe
+  const stripe = new THREE.Mesh(new THREE.BoxGeometry(4, 0.4, 280), new THREE.MeshStandardMaterial({ color: 0xffce5a, emissive: 0x554400, emissiveIntensity: 0.4 }));
+  stripe.position.y = 8.3; g.add(stripe);
+  // a couple of CIWS turrets for flavour
+  for (const [x, z] of [[-30, 120], [30, -120], [-30, -100]]){
+    const t = new THREE.Mesh(new THREE.CylinderGeometry(3, 4, 6, 8), new THREE.MeshStandardMaterial({ color: 0x20252a }));
+    t.position.set(x, 10, z); g.add(t);
+  }
+  return g;
+}
+
+// ===========================================================================
+//  The Battle singleton
+// ===========================================================================
+export const Battle = {
+  _live: false,
+  _S: null,            // the running sim state
+
+  start(config){
+    if (this._live) this.stop();
+    this._live = true;
+    this._S = new Sim(config);
+    this._S.boot();
+  },
+
+  stop(){
+    if (!this._live) return;
+    this._live = false;
+    if (this._S){ this._S.teardown(); this._S = null; }
+  },
+};
+
+// ===========================================================================
+//  Sim — owns the whole battle. One instance per Battle.start().
+// ===========================================================================
+class Sim {
+  constructor(config){
+    this.cfg = config;
+    this.env = ENVS[config.env] || ENVS.day;
+    this.objective = config.objective || { type: 'deathmatch', label: 'Destroy all enemies' };
+    // 'strike' is just a sink-the-carrier mission — alias it so the win condition,
+    // HUD carrier-HP readout and objective label all fire (without this, sinking the
+    // carrier registered no win and the mission was unbeatable).
+    if (this.objective.type === 'strike') this.objective = { ...this.objective, type: 'sink' };
+    this.timeLimit = config.timeLimit || (this.objective.type === 'survive' ? (this.objective.timeLimit || 120) : 0);
+
+    this.scene = null;
+    this.camera = null;
+    this.unsubFrame = null;
+
+    this.craft = [];          // all aircraft actors
+    this.carriers = [];       // carrier actors (large, mostly static)
+    this.bullets = [];        // tracer projectiles
+    this.missiles = [];       // homing/ballistic ordnance
+    this.torpedoes = [];      // sea-skimming torpedoes (surface-running, vs ships)
+    this.flares = [];         // countermeasure flares
+    this.fx = [];             // visual effects (sparks, explosions)
+    this.player = null;
+    this.remote = null;       // remote human craft (netplay)
+
+    this.time = 0;
+    this.over = false;
+    this.result = { win: false, kills: 0, deaths: 0, time: 0, score: 0, reason: '' };
+
+    this.groundY = 0;
+    this.statsCache = new Map();   // design -> stats (avoid recompute)
+
+    // world view passed to AI helpers
+    this.world = {
+      craft: this.craft, carriers: this.carriers, missiles: this.missiles,
+      player: null, groundY: 0, time: 0,
+    };
+
+    // input — Gravity-Front-style FREE-AIM: the mouse moves a reticle DIRECTION
+    // (aimYaw/aimPitch) and the aircraft noses toward it at its agility turn rate.
+    this.keys = Object.create(null);
+    this.aimYaw = 0; this.aimPitch = 0;   // free look/aim direction (radians)
+    this.pointerLocked = false;
+    this.assistOn = false;                // P: auto-aim guns at the lead point on lock
+
+    // camera state
+    this.camPos = new THREE.Vector3();
+    this.camLook = new THREE.Vector3();
+    this.shake = 0;
+
+    // lock system (the headline prediction feature)
+    this.lock = new LockSystem({ range: 2800, acquireAngle: 0.40, holdAngle: 0.62, team: 0 });
+
+    // hud
+    this.hud = null;       // dom root #hud
+    this.hudCanvas = null;
+    this.hudCtx = null;
+    this.dom = {};         // cached dom bar elements
+
+    // netplay
+    this.net = config.net || null;
+    this.netAccum = 0;
+    this.netRemoteState = null;     // latest received transform
+    this.netSpawned = false;
+    this.fireEvents = [];           // queued local fire events to send
+
+    // bound handlers (so we can remove them)
+    this._onKeyDown = this.onKeyDown.bind(this);
+    this._onKeyUp = this.onKeyUp.bind(this);
+    this._onMouseMove = this.onMouseMove.bind(this);
+    this._onMouseDown = this.onMouseDown.bind(this);
+    this._onPointerLock = this.onPointerLock.bind(this);
+    this._onContext = (e) => e.preventDefault();
+  }
+
+  stats(design){
+    let s = this.statsCache.get(design);
+    if (!s){ s = computeStats(design); this.statsCache.set(design, s); }
+    return s;
+  }
+
+  // ---------------------------------------------------------------------
+  //  BOOT: build world, spawn, hud, listeners, register the frame loop.
+  // ---------------------------------------------------------------------
+  boot(){
+    this.buildWorld();
+    this.buildHUD();
+    this.spawnAll();
+    this.bindInput();
+    this.world.player = this.player;
+    this.world.groundY = this.groundY;
+
+    // place chase camera behind the player to start
+    this.camPos.copy(this.player.pos).add(new THREE.Vector3(0, 6, -28));
+    this.camLook.copy(this.player.pos);
+    this.camera.position.copy(this.camPos);
+    this.camera.lookAt(this.camLook);
+
+    setScene(this.scene, this.camera);
+    this.unsubFrame = onFrame((dt) => this.frame(dt));
+
+    // netplay subscribe
+    if (this.net){
+      this.net.onMsg((msg) => this.onNetMsg(msg));
+      // announce our fleet immediately and periodically until peer spawns
+      this.sendFleet();
+    }
+
+    toast(this.objective.label || objectiveLabel(this.objective), '');
+  }
+
+  // ---------------------------------------------------------------------
+  //  WORLD: scene, sky, lights, terrain/sea, fog.
+  // ---------------------------------------------------------------------
+  buildWorld(){
+    const env = this.env;
+    const scene = new THREE.Scene();
+    this.scene = scene;
+    scene.fog = new THREE.Fog(env.fog, env.fogNear, env.fogFar);
+
+    // chase camera
+    this.camera = new THREE.PerspectiveCamera(68, innerWidth / innerHeight, 0.5, 14000);
+    this.camera.position.set(0, 360, -640);
+
+    // sky gradient as a big inward-facing sphere with a vertex-coloured shader-ish gradient
+    const skyGeo = new THREE.SphereGeometry(12000, 32, 16);
+    const skyMat = new THREE.ShaderMaterial({
+      side: THREE.BackSide, depthWrite: false,
+      uniforms: { top: { value: new THREE.Color(env.top) }, bot: { value: new THREE.Color(env.bot) } },
+      vertexShader: 'varying vec3 vp; void main(){ vp = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+      fragmentShader: 'varying vec3 vp; uniform vec3 top; uniform vec3 bot; void main(){ float h = clamp(vp.y/12000.0*0.5+0.5,0.0,1.0); gl_FragColor = vec4(mix(bot, top, pow(h,0.8)),1.0); }',
+    });
+    const sky = new THREE.Mesh(skyGeo, skyMat);
+    sky.renderOrder = -1;            // draw first, behind everything
+    scene.add(sky);
+    this.sky = sky;                  // kept centred on the camera each frame (see updateCamera)
+    // so the far side of the 12 km dome never falls outside the camera far plane and
+    // clips to a black "dome" when you fly away from the world origin.
+
+    // stars at night
+    if (env.stars){
+      const starGeo = new THREE.BufferGeometry();
+      const N = 1200, pos = new Float32Array(N * 3);
+      for (let i = 0; i < N; i++){
+        const r = 11000, u = Math.random() * 2 - 1, th = Math.random() * Math.PI * 2;
+        const s = Math.sqrt(1 - u * u);
+        pos[i * 3] = r * s * Math.cos(th); pos[i * 3 + 1] = Math.abs(r * u) * 0.8 + 200; pos[i * 3 + 2] = r * s * Math.sin(th);
+      }
+      starGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xcfe0ff, size: 26, sizeAttenuation: true })));
+    }
+
+    // lights
+    const sun = new THREE.DirectionalLight(env.sun, env.sunInt);
+    sun.position.set(env.sunPos[0] * 2000, env.sunPos[1] * 2000, env.sunPos[2] * 2000);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(1024, 1024);   // 1024² is plenty for these silhouettes; 2048² quadrupled the shadow-pass fill for no visible gain
+    const sc = sun.shadow.camera; sc.near = 50; sc.far = 4000; sc.left = -600; sc.right = 600; sc.top = 600; sc.bottom = -600;
+    scene.add(sun); scene.add(sun.target);
+    this.sun = sun;
+    scene.add(new THREE.HemisphereLight(env.hemi, env.hemiGround, env.ambient * 1.4));
+    scene.add(new THREE.AmbientLight(0xffffff, env.ambient * 0.3));
+
+    // Fixed pool of explosion lights, always present at intensity 0. Spawning a fresh
+    // PointLight per blast (and removing it) changes the scene's light count, which forces
+    // THREE to recompile every lit material — a stutter storm during heavy combat. Keeping
+    // the count constant and just driving intensity avoids the recompiles entirely.
+    this.boomLights = [];
+    for (let i = 0; i < 4; i++){ const L = new THREE.PointLight(0xff8833, 0, 220); scene.add(L); this.boomLights.push(L); }
+
+    // ground / sea — a big plane with subtle detail
+    const size = 24000;
+    const segs = env.sea ? 96 : 64;                  // finer mesh on water so swells read; 96 is plenty for a backdrop (160 was ~26k verts — needless cost)
+    const geo = new THREE.PlaneGeometry(size, size, segs, segs);
+    geo.rotateX(-Math.PI / 2);
+    if (env.sea){
+      // a LIVING sea: cache each vertex's base (x,z) and animate the height every
+      // frame (see updateSea) so the ocean rolls instead of sitting flat like ice.
+      const pa = geo.attributes.position;
+      const base = new Float32Array(pa.count * 2);
+      for (let i = 0; i < pa.count; i++){ base[i * 2] = pa.getX(i); base[i * 2 + 1] = pa.getZ(i); }
+      this.seaGeo = geo; this.seaBase = base; this.seaT = 0;
+      updateSeaGeo(geo, base, 0);                    // seed the first wave field
+    } else {
+      const pa = geo.attributes.position;
+      for (let i = 0; i < pa.count; i++){
+        const x = pa.getX(i), z = pa.getZ(i);
+        pa.setY(i, Math.sin(x * 0.004) * 22 + Math.cos(z * 0.0033) * 26);  // rolling hills
+      }
+      geo.computeVertexNormals();
+    }
+    const groundMat = new THREE.MeshStandardMaterial({
+      color: env.ground, metalness: env.sea ? 0.08 : 0.0, roughness: env.sea ? 0.52 : 0.95,
+      flatShading: !env.sea,
+    });
+    const ground = new THREE.Mesh(geo, groundMat);
+    ground.receiveShadow = true;
+    scene.add(ground);
+    this.ground = ground;
+    this.groundY = 0;
+
+    // grid-ish reference lines on land so motion/altitude reads clearly
+    if (!env.sea){
+      const grid = new THREE.GridHelper(size, 120, 0x2a3a2a, 0x1a241a);
+      grid.position.y = 1; grid.material.opacity = 0.25; grid.material.transparent = true;
+      scene.add(grid);
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  //  SPAWN: player, allies, enemies, carriers.
+  // ---------------------------------------------------------------------
+  spawnAll(){
+    const cfg = this.cfg;
+    // player (team 0) at origin, facing +Z.
+    // "Start airborne" (default on) puts you at altitude already moving; turning it
+    // off begins you resting on the surface (a runway on land, the water on a sea
+    // map) so you take off under your own power — pull up once you have flying speed.
+    const airborne = cfg.startAirborne !== false;
+    let playerPos;
+    if (airborne){
+      playerPos = new THREE.Vector3(0, 360, -600);
+    } else {
+      const surfY = this.surfaceHeight(0, -600);
+      playerPos = new THREE.Vector3(0, surfY + GROUND_CLEAR, -600);
+    }
+    this.player = this.makeCraft(cfg.player, 0, playerPos, 0, false);
+    this.player.isPlayer = true;
+    this.player.name = (cfg.player && cfg.player.name) || 'You';
+    if (this.player.isShipCraft){
+      // a piloted SHIP fights ON the water, never airborne — sit it at its waterline (≈sea level)
+      // from the start, regardless of the "start airborne" toggle (it can't take off anyway).
+      this.player.grounded = true;
+      this.player.vel.set(0, 0, 0);
+      this.player.pos.y = this.shipRestY(this.player);
+      this.player.group.position.copy(this.player.pos);
+    } else if (!airborne){
+      // a true STANDING START: rest on the surface at ZERO speed and take off under
+      // your own power (the throttle spools up; hold W for full power). With no engine
+      // the craft simply sits — it can't move itself. The surface holds it up (see
+      // integrate's grounded branch) until it has flying speed.
+      this.player.grounded = true;
+      this.player.vel.set(0, 0, 0);
+    }
+
+    // allies / wingmen (team 0). A CARRIER set as a wingman is a SHIP — it starts and
+    // fights on the ocean (steaming + point-defence), never a flying aircraft. Flying
+    // wingmen form up AHEAD of and beside you — a protective screen between you and the
+    // enemy (which spawns toward +Z), so you spawn tucked in the pocket rather than out
+    // front as the first target.
+    let carrierAllies = 0;
+    (cfg.allies || []).forEach((d, i) => {
+      if (!d) return;
+      if (d.isCarrier || d.role === 'carrier' || d.role === 'ship'){
+        const k = carrierAllies++;
+        this.makeCarrier(d, 0, new THREE.Vector3(260 + k * 150, 0, -1500 - k * 220));
+        return;
+      }
+      const w = i - carrierAllies;                 // flying-wingman index (skip any carrier allies)
+      const side = (w % 2) ? 1 : -1;
+      const rank = Math.floor(w / 2);              // pairs bracket you: 0,0,1,1,…
+      const lateral = side * (60 + rank * 44);     // a little out to your left/right
+      const ahead = 320 + rank * 120;              // …and well AHEAD, a screen between you and the enemy (+Z)
+      let pos;
+      if (airborne){
+        pos = new THREE.Vector3(lateral, 355 + rank * 6, -600 + ahead);
+      } else {
+        const sz = -600 + ahead;
+        pos = new THREE.Vector3(lateral, this.surfaceHeight(lateral, sz) + GROUND_CLEAR, sz);
+      }
+      const c = this.makeCraft(d, 0, pos, 0, true);
+      if (!airborne){ c.grounded = true; c.vel.set(0, 0, 0); }   // scramble from rest
+      c.name = (d.name || 'Wingman ' + (i + 1));
+      c.role = (this.stats(d).weapons.some(w => w.type === 'bomb')) ? 'bomber' : 'fighter';
+    });
+
+    if (this.net){
+      // PvP: the remote player's fleet spawns on receipt of their codes (team 1).
+      // We don't spawn AI enemies at all.
+    } else {
+      // enemies (team 1) — for each entry, `count` copies with the given skill.
+      // A carrier design fights as a ship on the surface, not an aircraft in the sky.
+      let ei = 0, ecn = 0;
+      (cfg.enemies || []).forEach((entry) => {
+        const d = entry.design;
+        if (!d) return;
+        if (d.isCarrier || d.role === 'carrier' || d.role === 'ship'){
+          for (let k = 0; k < (entry.count || 1); k++){
+            this.makeCarrier(d, 1, new THREE.Vector3(-300 + ecn * 220, 0, 2200 + ecn * 350));
+            ecn++;
+          }
+          return;
+        }
+        const st = this.stats(d);
+        const isBomber = st.weapons.some(w => w.type === 'bomb');
+        for (let k = 0; k < (entry.count || 1); k++){
+          const ang = (ei / 6) * Math.PI * 2;
+          const R = 1400 + (ei % 3) * 260;
+          const pos = new THREE.Vector3(Math.sin(ang) * R, 320 + (ei % 4) * 70, 1400 + Math.cos(ang) * R * 0.4);
+          const c = this.makeCraft(d, 1, pos, Math.PI, true, entry.skill ?? 0.5);
+          c.name = (d.name || 'Bandit') + ' ' + (ei + 1);
+          c.role = isBomber ? 'bomber' : 'fighter';
+          ei++;
+        }
+      });
+    }
+
+    // carriers
+    if (cfg.carrier){
+      this.makeCarrier(cfg.carrier, 0, new THREE.Vector3(0, 0, -2200));
+    }
+    if (cfg.enemyCarrier){
+      this.makeCarrier(cfg.enemyCarrier, 1, new THREE.Vector3(0, 0, 3000));
+    } else if (this.objective.type === 'sink'){
+      // sink objective with no design → spawn a default enemy carrier
+      this.makeCarrier(null, 1, new THREE.Vector3(0, 0, 3000));
+    }
+    if (this.objective.type === 'escort' && !cfg.carrier){
+      this.makeCarrier(null, 0, new THREE.Vector3(0, 0, -2200));
+    }
+
+    this.world.player = this.player;
+  }
+
+  // build one flyable craft actor
+  makeCraft(design, team, pos, yaw, isAI, skill = 0.5){
+    const stats = this.stats(design);
+    const group = buildAircraftMesh(design);
+    group.position.copy(pos);
+    group.rotation.y = yaw;
+    // A ship/carrier design flown as a craft renders at the shared SHIP_SCALE so it's the
+    // same size as the wingmen/enemy ships (NPC ships route to makeCarrier; only the PLAYER
+    // ever reaches makeCraft with a ship design). scaleMul also scales its hitbox, water
+    // clearance and chase-camera distance below.
+    const scaleMul = (design && (design.role === 'ship' || design.role === 'carrier' || design.isCarrier)) ? SHIP_SCALE : 1;
+    if (scaleMul !== 1) group.scale.setScalar(scaleMul);
+    this.scene.add(group);
+
+    // weapon runtime state (clip / reserve ammo / cooldown / heat already in stats)
+    const allWeapons = (stats.weapons || []).map((w) => ({
+      ...w,
+      ammo: w.clip,                       // rounds in current clip
+      reserve: Math.max(0, (w.ammo || w.clip) - w.clip),  // spare rounds
+      cool: 0,                            // seconds until next shot
+      reloading: 0,                       // seconds left on reload
+    }));
+    // Pair EVERY weapon with the mesh of the part that mounts it (by partKey, consuming
+    // duplicates in order) so each gun fires from its OWN barrel, not the hull centre —
+    // matters on a long ship where the guns are spread metres apart. Auto-turrets traverse
+    // + fire themselves (updateTurrets); manual weapons remember their mount for the muzzle.
+    const _usedNodes = new Set();
+    const claimNode = (key) => { for (const o of group.children){ if (!_usedNodes.has(o) && o.userData && o.userData.partKey === key){ _usedNodes.add(o); return o; } } return null; };
+    const weapons = [];
+    const turrets = [];
+    for (const w of allWeapons){
+      const node = claimNode(w.partKey);
+      if (w.turret) turrets.push({ w, node, aimYaw: 0, target: null });
+      else { w.node = node; weapons.push(w); }
+    }
+
+    const fwd = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+    const craft = {
+      design, stats, group,
+      team, isPlayer: false, isAI: !!isAI, isRemote: false,
+      scaleMul,                            // >1 for a ship/carrier hull flown as a craft
+      isShipCraft: scaleMul > 1,           // a piloted SHIP: floats on the sea, never an aircraft
+      name: design.name || 'Aircraft',
+      role: 'fighter',
+      pos: group.position,                 // alias (Vector3)
+      // An engineless craft (a carrier, a powerless hull) NEVER gets gifted speed —
+      // it can't move itself. A powered craft begins at cruise ONLY when it spawns
+      // airborne (already in flight); a surface/standing start zeroes this in spawnAll.
+      vel: new THREE.Vector3(),
+      speed: 0,
+      quat: group.quaternion,
+      hp: stats.durability || 100,
+      maxHp: stats.durability || 100,
+      armor: stats.armor || 0,
+      fuel: stats.fuelMass || 0,
+      maxFuel: stats.fuelMass || 1,
+      temp: AMBIENT_TEMP,
+      flares: stats.flares || 0,
+      weapons,
+      turrets,                             // auto-traversing defensive turrets (fire themselves)
+      curWeapon: weapons.length ? 0 : -1,
+      throttle: 0.7,
+      throttleTarget: 0.7,    // player: Z toggles engine on/off → 1 or 0; W/S fine-trim
+      engineOn: true,
+      boost: false,
+      airbrakeOn: false,      // deployable speed brake (B), if the craft mounts any airbrakes
+      ctrlPitch: 0, ctrlYaw: 0, ctrlRoll: 0,   // steering demand (set per-frame; init avoids NaN in HUD stick)
+      stalled: false,
+      alive: true,
+      dead: false,
+      // input/ai intents
+      wantGun: false, wantMissile: false, wantBomb: false, wantFlare: false,
+      aiDesired: null, aiWeaponIdx: -1,
+      dropTanksGone: false,
+      grounded: false,        // true only during a surface takeoff roll (startAirborne off)
+    };
+    if (isAI){
+      initAI(craft, skill);
+    }
+    this.craft.push(craft);
+    return craft;
+  }
+
+  makeCarrier(design, team, pos){
+    const isSea = this.env.sea;
+    const isShip = !!(design && design.role === 'ship');   // a 'ship' actively hunts surface targets
+    const mesh = buildCarrierMesh(design, isSea);
+    mesh.position.copy(pos);
+    // carriers sit on the surface
+    mesh.position.y = isSea ? 4 : 14;
+    this.scene.add(mesh);
+    // Tough but sinkable in a strike run: was durability*8+6000 (~16k for a Goliath),
+    // which no realistic bomb/missile loadout could chew through inside the time limit.
+    const hp = design ? this.stats(design).durability * 3 + 1800 : 5000;
+
+    // A carrier is fully AI — it has no pilot to manually pull a trigger, so EVERY gun
+    // on the deck auto-engages (not just turret-flagged ones; a plain flak cannon must
+    // fire too). Turret-flagged guns also TRAVERSE their barrels — wire those to their
+    // mesh node (mirrors makeCraft); plain deck guns fire from the hull along the bearing.
+    // The carrier mesh is scaled up in buildCarrierMesh, so updateTurrets lifts
+    // node.position by the group scale to place the muzzle correctly.
+    const designStats = design ? this.stats(design) : null;
+    // Pair EVERY deck gun (turret or fixed) with its own mesh node so it fires from its
+    // barrel, not the hull centre — and traverses to track. Matched by partKey, consuming
+    // duplicates in order (the carrier mesh is scaled, but updateTurrets lifts node.position
+    // by the group scale).
+    const _usedNodes = new Set();
+    const claimNode = (key) => { for (const o of mesh.children){ if (!_usedNodes.has(o) && o.userData && o.userData.partKey === key){ _usedNodes.add(o); return o; } } return null; };
+    const turrets = designStats
+      ? (designStats.weapons || [])
+          .filter(w => w.type === 'gun')
+          .map(w => ({ w: { ...w, ammo: w.clip, reserve: Math.max(0, (w.ammo || w.clip) - w.clip), cool: 0, reloading: 0 }, node: claimNode(w.partKey), aimYaw: 0, target: null }))
+      : [];
+    // Deck torpedo tubes (a `torpedo`-flagged weapon, any type) auto-launch at the nearest enemy
+    // surface vessel — their own slow pass (updateTorpedoMounts), separate from the gun turrets.
+    const torpedoMounts = designStats
+      ? (designStats.weapons || [])
+          .filter(w => w.torpedo)
+          .map(w => ({ w: { ...w, cool: 0 }, node: claimNode(w.partKey) }))
+      : [];
+
+    // collision radius tracks the rendered hull (design bbox × SHIP_SCALE)
+    const hbb = designStats && designStats.bbox ? designStats.bbox.size : null;
+    const hitR = hbb ? Math.max(hbb.x, hbb.z) * 0.55 * CARRIER_SCALE : (design ? 60 : 150);
+    // ship cruise speed scales INVERSELY with mass — a light corvette is fast (→ blitz), a
+    // heavy battleship is slow (→ crescent). This speed is what drives the formation choice.
+    // naval cruise from the design's actual propulsion (engines → speed), capped to a sane band —
+    // a ship now MOVES at the speed its stat advertises, instead of an unrelated mass-only crawl.
+    const shipSpeed = isShip ? navalCruise(designStats) : 24;
+    const carrier = {
+      design, mesh, team, hitR,
+      pos: mesh.position,
+      vel: isShip ? new THREE.Vector3() : new THREE.Vector3((team === 1 ? -1 : 1) * 6, 0, 0),  // ships steer under pursuit AI; carriers steam slowly
+      hp, maxHp: hp,
+      alive: true,
+      pdRange: 1700, pdSpeed: 1100, pdCool: 0,
+      isCarrier: true,
+      isShip, shipSpeed,       // isShip → hunt the nearest enemy surface unit (see updateCarrier)
+      // naval-squadron state (set per-frame by updateFleets): same-type units form up
+      inFleet: false, fleetLeader: null, slotIndex: 0, escortCount: 0, formation: 'wedge', fleetFormed: false,
+      isAI: true,            // so updateTurrets gives it AI-style infinite reloads
+      group: mesh,           // alias so updateTurrets can read .group.quaternion
+      turrets, torpedoMounts,
+      name: design ? design.name : (team === 0 ? 'Friendly Carrier' : 'Enemy Carrier'),
+    };
+    this.carriers.push(carrier);
+    return carrier;
+  }
+
+  // ---------------------------------------------------------------------
+  //  HUD scaffolding (DOM bars + 2D canvas overlay)
+  // ---------------------------------------------------------------------
+  buildHUD(){
+    const hud = $('hud');
+    this.hud = hud;
+    show(hud);
+    // clear any prior children except the canvas
+    Array.from(hud.children).forEach(ch => { if (ch.id !== 'hud-canvas') ch.remove(); });
+    let canvas = $('hud-canvas');
+    if (!canvas){ canvas = el('canvas'); canvas.id = 'hud-canvas'; hud.appendChild(canvas); }
+    this.hudCanvas = canvas;
+    this.hudCtx = canvas.getContext('2d');
+    this.resizeHUD();
+    this._onResize = () => this.resizeHUD();
+    addEventListener('resize', this._onResize);
+
+    // bottom-left: status bars
+    const bl = el('div', 'hud-bl');
+    bl.innerHTML = `
+      <div class="hud-bar-label"><span>HP / ARMOR</span><span class="v-hp">100%</span></div>
+      <div class="hud-bar"><i class="hp" style="width:100%"></i></div>
+      <div class="hud-bar-label"><span>FUEL</span><span class="v-fuel">100%</span></div>
+      <div class="hud-bar"><i class="fuel" style="width:100%"></i></div>
+      <div class="hud-bar-label"><span>BOOST</span><span class="v-boost"></span></div>
+      <div class="hud-bar"><i class="boost" style="width:100%"></i></div>
+      <div class="hud-bar-label"><span>HEAT</span><span class="v-heat"></span></div>
+      <div class="hud-bar"><i class="heat" style="width:0%"></i></div>
+      <div class="hud-weapon v-weapon">—</div>`;
+    hud.appendChild(bl);
+
+    // top-left: speed/alt/throttle
+    const tl = el('div', 'hud-tl');
+    tl.innerHTML = `<div class="v-spd">SPD —</div><div class="v-alt">ALT —</div><div class="v-thr">THR —</div><div class="v-mach"></div>`;
+    hud.appendChild(tl);
+
+    // top-centre: objective
+    const tc = el('div', 'hud-tc');
+    tc.innerHTML = `<div class="v-obj" style="font-size:13px;color:var(--accent);letter-spacing:.14em;"></div><div class="v-objsub" style="font-size:12px;color:var(--ink-dim);"></div>`;
+    hud.appendChild(tc);
+
+    // bottom-right: radar
+    const br = el('div', 'hud-br');
+    const radar = el('canvas');
+    radar.width = 180; radar.height = 180;
+    radar.style.cssText = 'border:1px solid var(--edge);border-radius:50%;background:rgba(6,12,20,.6);';
+    br.appendChild(radar);
+    hud.appendChild(br);
+    this.radar = radar; this.radarCtx = radar.getContext('2d');
+
+    // centre warning message
+    const msg = el('div', 'hud-msg');
+    hud.appendChild(msg);
+
+    // controls legend — fades out a few seconds into the sortie
+    const help = el('div', 'hud-help');
+    help.innerHTML = '<b>MOUSE</b> aim &amp; fly (nose chases the reticle) · <b>SHIFT</b> boost · <b>S</b> brake · <b>Z</b> engine on/off · ' +
+      '<b>B</b> airbrake · <b>SPACE</b> fire · <b>P</b> aim-assist · <b>TAB</b>/<b>Q</b>/<b>E</b> weapon · <b>F</b> flares · <b>G</b> drop tanks · click to capture mouse';
+    hud.appendChild(help);
+    this._helpEl = help;
+    this._helpT1 = setTimeout(() => help.classList.add('fade'), 6500);
+    this._helpT2 = setTimeout(() => { if (help.parentNode) help.remove(); }, 8200);
+
+    this.dom = {
+      hp: bl.querySelector('.hp'), hpv: bl.querySelector('.v-hp'),
+      fuel: bl.querySelector('.fuel'), fuelv: bl.querySelector('.v-fuel'),
+      boost: bl.querySelector('.boost'), boostv: bl.querySelector('.v-boost'),
+      heat: bl.querySelector('.heat'), heatv: bl.querySelector('.v-heat'),
+      weapon: bl.querySelector('.v-weapon'),
+      spd: tl.querySelector('.v-spd'), alt: tl.querySelector('.v-alt'), thr: tl.querySelector('.v-thr'), mach: tl.querySelector('.v-mach'),
+      obj: tc.querySelector('.v-obj'), objsub: tc.querySelector('.v-objsub'),
+      msg,
+    };
+    this.dom.obj.textContent = objectiveLabel(this.objective);
+  }
+
+  resizeHUD(){
+    if (!this.hudCanvas) return;
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    this.hudCanvas.width = innerWidth * dpr;
+    this.hudCanvas.height = innerHeight * dpr;
+    this.hudCanvas.style.width = innerWidth + 'px';
+    this.hudCanvas.style.height = innerHeight + 'px';
+    this.hudCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.W = innerWidth; this.H = innerHeight;
+  }
+
+  // ---------------------------------------------------------------------
+  //  INPUT
+  // ---------------------------------------------------------------------
+  bindInput(){
+    addEventListener('keydown', this._onKeyDown);
+    addEventListener('keyup', this._onKeyUp);
+    addEventListener('mousemove', this._onMouseMove);
+    addEventListener('mousedown', this._onMouseDown);
+    addEventListener('contextmenu', this._onContext);
+    document.addEventListener('pointerlockchange', this._onPointerLock);
+  }
+  unbindInput(){
+    removeEventListener('keydown', this._onKeyDown);
+    removeEventListener('keyup', this._onKeyUp);
+    removeEventListener('mousemove', this._onMouseMove);
+    removeEventListener('mousedown', this._onMouseDown);
+    removeEventListener('contextmenu', this._onContext);
+    document.removeEventListener('pointerlockchange', this._onPointerLock);
+    if (this._onResize) removeEventListener('resize', this._onResize);
+    if (document.pointerLockElement) document.exitPointerLock();
+  }
+
+  onKeyDown(e){
+    const k = e.key.toLowerCase();
+    this.keys[k] = true;
+    if (k === 'tab'){ e.preventDefault(); this.cycleWeapon(1); }
+    else if (k === 'q'){ this.cycleWeapon(-1); }
+    else if (k === 'e'){ this.cycleWeapon(1); }
+    else if (k === 'z'){ e.preventDefault(); this.toggleEngine(); }
+    else if (k === 'b'){ this.toggleAirbrake(); }
+    else if (k === 'p'){ this.assistOn = !this.assistOn; this.flashMsg(this.assistOn ? 'AIM ASSIST ON' : 'AIM ASSIST OFF', this.assistOn ? 'good' : '', 1.0); }
+    else if (k === 'f'){ this.firePlayerFlare(); }
+    else if (k === 'g'){ this.jettison(this.player); }
+    else if (k === 'escape'){ this.endBattle(false, 'Aborted'); }
+  }
+
+  // Z toggles the engine master switch: ON spools to full thrust, OFF cuts to a glide.
+  toggleEngine(){
+    const p = this.player; if (!p || !p.alive) return;
+    p.engineOn = !p.engineOn;
+    p.throttleTarget = p.engineOn ? 1 : 0;
+    this.flashMsg(p.engineOn ? 'ENGINE ON' : 'ENGINE CUT — GLIDING', p.engineOn ? 'good' : 'warn', 0.9);
+    sfx(p.engineOn ? 'thrust' : 'click', 0.3);
+  }
+
+  // B deploys/retracts the airbrakes (only if the airframe actually mounts any).
+  toggleAirbrake(){
+    const p = this.player; if (!p || !p.alive) return;
+    if (!(p.stats.airbrakeArea > 0)){ this.flashMsg('NO AIRBRAKES FITTED', 'warn', 0.7); return; }
+    p.airbrakeOn = !p.airbrakeOn;
+    this.flashMsg(p.airbrakeOn ? 'AIRBRAKE OUT' : 'AIRBRAKE IN', '', 0.7);
+    sfx('click', 0.3);
+  }
+  onKeyUp(e){ this.keys[e.key.toLowerCase()] = false; }
+
+  onMouseMove(e){
+    if (!this.pointerLocked) return;
+    const sens = 0.0026;
+    const invert = State.settings && State.settings.invertY ? -1 : 1;
+    // move a free reticle direction; the nose chases it (see integrate()).
+    this.aimYaw -= e.movementX * sens;
+    this.aimPitch = clamp(this.aimPitch - e.movementY * sens * invert, -1.2, 1.2);  // mouse up = look up
+  }
+  onMouseDown(e){
+    if (!this.pointerLocked && e.button === 0){
+      const cv = $('gl');
+      if (cv && cv.requestPointerLock){
+        // requestPointerLock rejects (browser security) if called too soon after the
+        // user exited the lock — swallow that so it never becomes a fatal "unhandled
+        // promise rejection". The user just clicks again a moment later.
+        try { const r = cv.requestPointerLock({ unadjustedMovement: false }); if (r && typeof r.catch === 'function') r.catch(() => {}); }
+        catch (_){ /* older browsers throw synchronously — ignore */ }
+      }
+    }
+  }
+  onPointerLock(){ this.pointerLocked = !!document.pointerLockElement; }
+
+  cycleWeapon(dir){
+    const p = this.player; if (!p || !p.weapons.length) return;
+    p.curWeapon = (p.curWeapon + dir + p.weapons.length) % p.weapons.length;
+    this.lock.reset();
+    sfx('ui', 0.3);
+  }
+
+  // ---------------------------------------------------------------------
+  //  MAIN FRAME
+  // ---------------------------------------------------------------------
+  frame(dt){
+    if (this.over){ this.renderHUD(dt); return; }
+    if (!(dt > 0)) return;              // guard zero/negative dt (paused/odd clock)
+    dt = Math.min(dt, 0.05);            // extra safety for the physics step
+    this.time += dt;
+    this.result.time = this.time;
+    this.world.time = this.time;
+
+    // 1. player input → intents
+    this.readPlayerInput(dt);
+
+    // 2. AI for non-player, non-remote craft. The squad brain runs first so each
+    //    fighter gets its coordinated target + flank bearing for this frame.
+    updateSquads(this.world, dt);
+    for (const c of this.craft){
+      if (!c.alive || c.isPlayer || c.isRemote) continue;
+      if (c.role === 'bomber' && this.carriers.some(cc => cc.alive && cc.team !== c.team)) updateBomber(c, this.world, dt);
+      else updateAI(c, this.world, dt);
+    }
+
+    // 3. integrate flight for every craft
+    for (const c of this.craft){ if (c.alive && !c.isRemote) this.integrate(c, dt); }
+
+    // 4. remote interpolation (netplay)
+    if (this.net) this.netTick(dt);
+
+    // 5. firing
+    for (const c of this.craft){ if (c.alive && !c.isRemote) this.handleFiring(c, dt); }
+
+    // 5b. auto-turrets traverse + fire on their own (player + AI + carrier deck guns)
+    for (const c of this.craft){ if (c.alive && !c.isRemote) this.updateTurrets(c, dt); }
+    for (const cc of this.carriers){ if (cc.alive && cc.turrets && cc.turrets.length) this.updateTurrets(cc, dt); }
+    for (const cc of this.carriers){ if (cc.alive && cc.torpedoMounts && cc.torpedoMounts.length) this.updateTorpedoMounts(cc, dt); }
+
+    // 6. carriers / ships — form same-type squadrons, then move + point-defend
+    this.updateFleets(dt);
+    for (const cc of this.carriers){ if (cc.alive) this.updateCarrier(cc, dt); }
+
+    // 7. ordnance
+    this.updateBullets(dt);
+    this.updateMissiles(dt);
+    this.updateTorpedoes(dt);
+    this.updateFlares(dt);
+    this.updateFX(dt);
+    if (this.seaGeo){
+      this.seaT += dt;                               // the ocean rolls slowly — re-tessellate it
+      this._seaTick = (this._seaTick || 0) + 1;      // every OTHER frame (≈30 Hz), imperceptible
+      if (this._seaTick & 1) updateSeaGeo(this.seaGeo, this.seaBase, this.seaT);
+    }
+
+    // 8. lock system (player) + camera
+    this.updateLock(dt);
+    this.updateCamera(dt);
+
+    // 9. objective + end conditions
+    this.checkObjective(dt);
+
+    // 10. HUD
+    this.renderHUD(dt);
+
+    // 11. net send
+    if (this.net) this.netSend(dt);
+  }
+
+  // ---------------------------------------------------------------------
+  //  PLAYER INPUT → throttle / steering / fire intents
+  // ---------------------------------------------------------------------
+  readPlayerInput(dt){
+    const p = this.player; if (!p || !p.alive) return;
+    const K = this.keys;
+    // throttle (Gravity-Front style): the engine always cruises forward; SHIFT
+    // boosts (afterburner), S brakes. Z cuts the engine entirely (glide). The
+    // throttle spools toward the target so power never snaps on/off.
+    let tgt;
+    if (!p.engineOn) tgt = 0;                                  // engine cut → glide
+    else if (K['shift'] && p.fuel > 0) tgt = 1;                // boost
+    else if (K['s']) tgt = 0.35;                               // brake
+    else if (K['w']) tgt = 1;                                  // hold full power
+    else tgt = 0.82;                                           // cruise
+    p.throttleTarget = tgt;
+    p.throttle = dampF(p.throttle, tgt, 2.4, dt);
+    p.boost = !!K['shift'] && p.fuel > 0 && p.engineOn;
+
+    // --- free-aim: the mouse moves a reticle DIRECTION; the nose chases it at the
+    //     airframe's agility turn rate (the steering lives in integrate()). This is
+    //     the Gravity Front "fly toward where you're looking" dogfight model. -----
+    const cp = Math.cos(this.aimPitch);
+    p.flyDir = (p.flyDir || new THREE.Vector3()).set(Math.sin(this.aimYaw) * cp, Math.sin(this.aimPitch), Math.cos(this.aimYaw) * cp);
+    p.aimDir = (p.aimDir || new THREE.Vector3()).copy(p.flyDir);   // guns fire along the reticle (see fireWeapon)
+    p.manualRoll = (K['a'] ? 1 : 0) + (K['d'] ? -1 : 0);          // optional manual roll on top of auto-bank
+
+    // fire
+    p.wantGun = false; p.wantMissile = false; p.wantBomb = false;
+    if (K[' '] || K['spacebar']){
+      const w = p.weapons[p.curWeapon];
+      if (w){
+        if (w.type === 'gun') p.wantGun = true;
+        else if (w.type === 'bomb') p.wantBomb = true;
+        else if (w.type === 'lockmissile'){ /* auto-fires on full lock */ }
+        else p.wantMissile = true;   // ir / radar → fire on press toward lock target
+      }
+    }
+    p.aiWeaponIdx = p.curWeapon;
+  }
+
+  // ---------------------------------------------------------------------
+  //  FLIGHT INTEGRATOR — the physics, all derived from stats.
+  // ---------------------------------------------------------------------
+  integrate(c, dt){
+    const s = c.stats;
+    const mass = Math.max(50, s.dryMass + c.fuel);     // live mass (fuel burns off)
+    const fwd = TMP.set(0, 0, 1).applyQuaternion(c.group.quaternion);
+    const v = c.vel;
+    const speed = v.length();
+    c.speed = speed;
+
+    // --- orientation: turn the nose toward a DESIRED DIRECTION at agility rate ---
+    // The player and the AI share this: the player's target is the mouse reticle
+    // (flyDir), the AI's is its computed pursuit heading (aiDesired). The nose
+    // chases that direction, banking into the turn — the Gravity Front model.
+    let dPitch = 0, dYaw = 0, dRoll = 0;
+    const ag = s.agility;
+    const want = c.isPlayer ? c.flyDir : c.aiDesired;
+    if (want){
+      const wn = TMP2.copy(want).normalize();
+      const up = TMP3.set(0, 1, 0).applyQuaternion(c.group.quaternion);
+      const right = _R.set(1, 0, 0).applyQuaternion(c.group.quaternion);
+      const yawErr = Math.atan2(wn.dot(right), wn.dot(fwd));
+      const pitchErr = Math.asin(clamp(wn.dot(up), -1, 1));
+      const gain = c.isPlayer ? 2.4 : 1;                  // the player snaps to the reticle harder than the AI lazily tracks
+      const yawD = clamp(yawErr * gain, -1, 1), pitchD = clamp(pitchErr * gain, -1, 1);
+      dYaw = yawD * ag.yaw * DEG * dt;
+      dPitch = pitchD * ag.pitch * DEG * dt;
+      // coordinated bank — drive roll toward a target bank ANGLE (proportional to the
+      // turn demand, capped at MAX_BANK), NOT a raw rate. A rate would integrate without
+      // bound in a sustained turn and roll the aircraft inverted (and kill its lift).
+      const bankNow = Math.atan2(right.y, up.y);
+      const bankWant = yawD * BANK_SIGN * MAX_BANK;
+      const authority = clamp(up.y, 0, 1);               // fade near knife-edge/inverted so loops aren't fought
+      let rollD = authority * clamp((bankWant - bankNow) * 3.0, -1, 1);
+      if (c.isPlayer) rollD = clamp(rollD + (c.manualRoll || 0), -1, 1);   // manual roll layered on top
+      dRoll = rollD * ag.roll * DEG * dt;
+      if (c.isPlayer){ c.ctrlPitch = pitchD; c.ctrlYaw = yawD; c.ctrlRoll = rollD; }        // expose to the HUD stick
+    }
+
+    // stall: below vStall the control surfaces bite poorly and the nose drops
+    const stallV = isFinite(s.vStall) ? s.vStall : 0;
+    c.stalled = speed < stallV * 0.92 && (c.pos.y - this.groundY) > 5;
+    let ctrlScale = 1;
+    if (c.stalled){
+      ctrlScale = clamp(speed / Math.max(1, stallV), 0.15, 0.6);   // mushy controls
+    }
+    dPitch *= ctrlScale; dYaw *= ctrlScale; dRoll *= ctrlScale;
+
+    // apply rotations in body frame: roll, then pitch, then yaw.
+    // NOTE: a positive pitch DEMAND must raise the nose. Rotating about body +X
+    // lowers the nose, so we negate here — this single sign fixes BOTH the player
+    // (mouse-up / pull = nose-up) and the AI (dPitch = +pitchErr toward a target
+    // that is above the nose), which share this code path.
+    QTMP.setFromAxisAngle(TMP.set(0, 0, 1), dRoll); c.group.quaternion.multiply(QTMP);
+    QTMP.setFromAxisAngle(TMP.set(1, 0, 0), -dPitch); c.group.quaternion.multiply(QTMP);
+    QTMP.setFromAxisAngle(TMP.set(0, 1, 0), dYaw); c.group.quaternion.multiply(QTMP);
+    c.group.quaternion.normalize();
+
+    // recompute forward after rotation
+    fwd.set(0, 0, 1).applyQuaternion(c.group.quaternion);
+
+    // --- forces ---
+    const acc = _ACC.set(0, 0, 0);
+
+    // thrust along forward (no thrust if out of fuel)
+    let thrust = 0;
+    let genFrac = 0;
+    if (c.fuel > 0){
+      thrust = s.thrust * c.throttle;
+      genFrac = c.throttle * 0.5;
+      if (c.boost && c.fuel > 0){
+        thrust = s.boostThrust * Math.max(c.throttle, 0.6);
+        genFrac = 1;
+      }
+    }
+    acc.addScaledVector(fwd, thrust / mass);
+
+    // drag opposes velocity (+ deployed airbrakes add a big slab of drag).
+    // base drag reuses dragForce (single source of truth); brake is capped so a
+    // craft stacked with airbrakes can't pull non-physical 50g+ deceleration.
+    if (speed > 0.1){
+      const brake = c.airbrakeOn ? Math.min(s.airbrakeArea || 0, s.dragArea * 4) : 0;
+      let drag = dragForce(s, speed) + 0.5 * RHO * brake * speed * speed;
+      // While rolling/planing on the surface the craft is on wheels or a hull
+      // skimming the water — not ploughing through it. Cut drag hard so the
+      // ground run is a brisk accelerate-to-rotate, not a sticky, icy crawl.
+      if (c.grounded) drag *= 0.28;
+      acc.addScaledVector(v, -(drag / mass) / speed);
+    }
+
+    // lift: wings convert forward speed into an upward force opposing gravity.
+    // We model lift as acting along the craft's up axis, scaled by speed²,
+    // capped so it can roughly balance weight at/above cruise. Below stall the
+    // wing loses lift and the aircraft sinks.
+    const upAxis = TMP2.set(0, 1, 0).applyQuaternion(c.group.quaternion);
+    if (s.liftArea > 0 && speed > 1){
+      const liftCap = mass * 9.80665 * 1.15;     // can pull a bit more than 1g
+      let lift = 0.5 * RHO * s.liftArea * speed * speed * 1.1;
+      if (speed < stallV) lift *= clamp(speed / Math.max(1, stallV), 0, 1) * 0.5;  // stall drop-off
+      lift = Math.min(lift, liftCap);
+      acc.addScaledVector(upAxis, lift / mass);
+    }
+
+    // gravity
+    acc.y -= 9.80665;
+
+    // integrate velocity & position
+    v.addScaledVector(acc, dt);
+    // clamp to physical top speed (boost vs normal) to keep it sane
+    const vCap = (c.boost ? s.vMaxBoost : s.vMax) * 1.05 || 400;
+    const sp2 = v.length();
+    if (sp2 > vCap && vCap > 0) v.multiplyScalar(vCap / sp2);
+    c.pos.addScaledVector(v, dt);
+
+    // --- fuel burn ---
+    if (c.fuel > 0 && thrust > 0){
+      let burn = s.burnRate * c.throttle;
+      if (c.boost) burn += s.boostBurn;
+      c.fuel = Math.max(0, c.fuel - burn * dt);
+      if (c.fuel <= 0 && c.isPlayer) this.flashMsg('FUEL EXHAUSTED', 'bad');
+    }
+
+    // --- heat / overheat ---
+    // gun fire adds heat impulsively in handleFiring; engine adds via genFrac here
+    c.temp = thermoStep(s, c.temp, genFrac, speed, dt);
+    if (c.temp > s.overheat){
+      const over = (c.temp - s.overheat);
+      this.damage(c, over * 0.02 * dt * 60, null, false);   // continuous overheat damage
+      if (c.isPlayer) this.flashMsg('OVERHEAT', 'bad');
+    }
+    c.temp = Math.max(AMBIENT_TEMP, c.temp);
+
+    // --- ground / sea collision ---
+    const surfY = this.surfaceHeight(c.pos.x, c.pos.z);
+
+    // takeoff roll: a craft that began on the surface (startAirborne off) rests on
+    // it rather than crashing — the surface supports it against gravity while it
+    // builds speed. It lifts off once it has flying speed and is actually climbing.
+    if (c.grounded){
+      if (c.isShipCraft){
+        // a piloted SHIP is a surface vessel: float it at its waterline (a small draft + swell bob)
+        // and never climb out. The old GROUND_CLEAR×scaleMul belly-lift parked a 2× hull ~17 m up.
+        c.pos.y = this.shipRestY(c);
+        c.vel.y = 0;
+        c.group.position.copy(c.pos);
+        return;                                       // stays on the water; never takes off, never crashes
+      }
+      const rest = surfY + GROUND_CLEAR * (c.scaleMul || 1);
+      if (c.pos.y < rest) c.pos.y = rest;
+      if (c.vel.y < 0) c.vel.y = 0;                 // surface holds it up
+      const stallV = isFinite(s.vStall) ? s.vStall : 60;
+      if (speed > stallV && c.vel.y > 0.5){
+        c.grounded = false;                         // wheels/hull up — flying now
+      } else {
+        c.group.position.copy(c.pos);
+        return;                                      // still on the surface; skip the crash check
+      }
+    }
+
+    if (c.pos.y <= surfY + 2){
+      // crash
+      if (speed > 40 || Math.abs(v.y) > 18 || c.pos.y < surfY){
+        this.killCraft(c, this.env.sea ? 'Splashed down' : 'Crashed', null);
+      } else {
+        // gentle — bounce/limit (basically landed; treat as crash for the sim simplicity but soft)
+        this.killCraft(c, this.env.sea ? 'Ditched' : 'Crashed', null);
+      }
+      return;
+    }
+
+    // keep group transform synced
+    c.group.position.copy(c.pos);
+  }
+
+  surfaceHeight(x, z){
+    if (this.env.sea) return Math.sin(x * 0.01) * 1.6 + Math.cos(z * 0.013) * 1.4;
+    return Math.sin(x * 0.004) * 22 + Math.cos(z * 0.0033) * 26;
+  }
+
+  // the Y a piloted SHIP floats at: the local sea surface + a believable draft (scales with the
+  // hull's height × its render scale, so a tall ship rides higher) + a gentle swell bob. This sits
+  // the vessel on the water at ≈sea level instead of GROUND_CLEAR×scaleMul (~17 m) up in the air.
+  shipRestY(c){
+    const surfY = this.surfaceHeight(c.pos.x, c.pos.z);
+    const draft = Math.max(1, ((c.stats && c.stats.bbox && c.stats.bbox.size.y) || 3) * (c.scaleMul || 1) * 0.15);
+    return surfY + draft + (this.env.sea ? Math.sin((this.time || 0) * 0.6) * 0.5 : 0);
+  }
+
+  // ---------------------------------------------------------------------
+  //  FIRING — guns / missiles / lockmissile / bombs
+  // ---------------------------------------------------------------------
+  handleFiring(c, dt){
+    if (!c.weapons || !c.weapons.length) return;
+    // tick cooldown / reload on all weapons
+    for (const w of c.weapons){
+      if (w.cool > 0) w.cool -= dt;
+      if (w.reloading > 0){
+        w.reloading -= dt;
+        if (w.reloading <= 0){
+          const take = Math.min(w.clip, w.reserve > 0 ? w.reserve : w.clip);
+          w.ammo = c.isAI ? w.clip : take;            // AI gets simplified infinite-ish reloads
+          if (!c.isAI && w.reserve > 0){ w.reserve -= take; }
+          if (c.isAI) w.reserve = w.clip;
+        }
+      }
+    }
+
+    const idx = c.isPlayer ? c.curWeapon : (c.aiWeaponIdx >= 0 ? c.aiWeaponIdx : c.curWeapon);
+    const w = c.weapons[idx];
+    if (!w) return;
+
+    // lockmissile is special: it auto-fires for the player on full lock; for AI
+    // it behaves like a normal homing missile via wantMissile.
+    if (c.isPlayer && w.type === 'lockmissile'){
+      // handled in updateLock via this.tryFireLockMissile
+    }
+
+    const wantsThis = (w.type === 'gun' && c.wantGun) ||
+                      ((w.type === 'missile' || w.type === 'radar') && c.wantMissile) ||
+                      (w.type === 'bomb' && c.wantBomb) ||
+                      (w.type === 'lockmissile' && c.isAI && c.wantMissile);
+
+    if (!wantsThis) return;
+    if (w.reloading > 0 || w.cool > 0) return;
+    if (w.ammo <= 0){
+      if (w.reserve > 0 || c.isAI){ w.reloading = w.reload; if (c.isPlayer && c === this.player) this.flashMsg('RELOADING…', 'warn'); }
+      return;
+    }
+
+    // overheat lock-out for guns
+    if (w.type === 'gun' && c.temp > c.stats.overheat * 0.98){ return; }
+
+    this.fireWeapon(c, w, idx);
+    w.cool = 1 / Math.max(0.1, w.rof);
+    w.ammo -= 1;
+    if (w.ammo <= 0 && (w.reserve > 0 || c.isAI)) w.reloading = w.reload;
+  }
+
+  // muzzle world position + forward for craft c (offset to the nose)
+  muzzle(c, out, w){
+    out = out || new THREE.Vector3();
+    const q = c.group.quaternion;
+    if (w && w.node){
+      // fire from the actual gun's mount: its (unscaled-local) position lifted by the
+      // craft scale into world space, nudged forward to clear the hull.
+      const s = c.group.scale.x || 1;
+      out.copy(w.node.position).multiplyScalar(s).applyQuaternion(q).add(c.pos);
+      out.addScaledVector(TMP.set(0, 0, 1).applyQuaternion(q), 2 * s);
+    } else {
+      out.copy(c.pos).addScaledVector(TMP.set(0, 0, 1).applyQuaternion(q), 8);
+    }
+    return out;
+  }
+
+  fireWeapon(c, w, idx){
+    const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(c.group.quaternion);
+    const muzzle = this.muzzle(c, null, w);   // fire from this weapon's own mount, not the hull centre
+    if (w.type === 'gun'){
+      // fast tracer projectile with spread.
+      const spread = w.spread || 0;
+      // the player fires along the AIM reticle ("shoot where you look"); with aim
+      // assist on and a lock, the line snaps to the computed lead point.
+      let dir;
+      if (c.isPlayer && c.aimDir){
+        if (this.assistOn && this.lock.target && this.lock.target.alive){
+          const lead = leadPoint(muzzle, this.lock.target, w.speed || 1200);
+          dir = new THREE.Vector3(lead.x - muzzle.x, lead.y - muzzle.y, lead.z - muzzle.z).normalize();
+        } else {
+          // GUN CONVERGENCE — the chase camera sits ~11 m above the airframe and
+          // looks parallel to the gun line, so firing straight along the reticle
+          // sends rounds UNDER whatever the player has centred (the old "you have
+          // to aim on top of them to hit" bug). Instead aim from the muzzle THROUGH
+          // the point the crosshair is looking at, at the target's range, so the
+          // centre of the reticle lands on the enemy's centre of mass.
+          const lt = this.lock && this.lock.target && this.lock.target._src;
+          const range = (lt && lt.alive && lt.pos)
+            ? Math.hypot(lt.pos.x - this.camPos.x, lt.pos.y - this.camPos.y, lt.pos.z - this.camPos.z)
+            : 650;
+          dir = new THREE.Vector3(
+            this.camPos.x + c.aimDir.x * range - muzzle.x,
+            this.camPos.y + c.aimDir.y * range - muzzle.y,
+            this.camPos.z + c.aimDir.z * range - muzzle.z,
+          ).normalize();
+          // back out the craft's own velocity (spawnBullet adds it to the round) so
+          // the bullet's TRUE trajectory — not just its launch heading — crosses the
+          // reticle. Matters most for fast jets and slow rounds (rockets).
+          const spd = w.speed || 1200;
+          dir.set(dir.x - c.vel.x / spd, dir.y - c.vel.y / spd, dir.z - c.vel.z / spd).normalize();
+        }
+      } else dir = fwd.clone();
+      if (spread){
+        dir.x += (Math.random() - 0.5) * spread * 2;
+        dir.y += (Math.random() - 0.5) * spread * 2;
+        dir.z += (Math.random() - 0.5) * spread * 2;
+        dir.normalize();
+      }
+      this.spawnBullet(c, muzzle, dir, w);
+      // heat
+      c.temp += (w.heatPerShot || 0) / Math.max(1, c.stats.heatCap) * 1;
+      if (c.isPlayer) this.shake = Math.min(0.5, this.shake + (w.key === 'cannon' ? 0.18 : 0.05));
+      sfx(w.key === 'cannon' ? 'cannon' : (w.key === 'gatling' ? 'gatling' : 'mg'), c.isPlayer ? 0.22 : 0.09);
+    } else if (w.type === 'missile' || w.type === 'radar' || w.type === 'lockmissile'){
+      // homing missile toward current lock/AI target. The lock stores a lockView
+      // ({position,vel,_src}); unwrap to the real craft (._src) so the missile homer,
+      // which reads target.pos, gets a live object instead of crashing every frame.
+      let target = null;
+      if (c.isPlayer){ target = (this.lock.target && this.lock.target._src) || this.bestForwardTarget(c); }
+      else { target = c.ai ? c.ai.target : pickTarget(c, this.world); }
+      const launchDir = (c.isPlayer && c.aimDir) ? c.aimDir : fwd;   // player missiles leave along the reticle
+      if (w.torpedo){
+        // a torpedo isn't a missile: it splashes down and RUNS along the sea toward a surface
+        // vessel (an aircraft-dropped aerial torpedo, or a player warship's tube). See spawnTorpedo.
+        this.spawnTorpedo(c, muzzle, launchDir, w, target);
+      } else {
+        this.spawnMissile(c, muzzle, launchDir, w, target);
+        sfx('missile', c.isPlayer ? 0.3 : 0.12);
+        if (c.isPlayer) this.shake = Math.min(0.6, this.shake + 0.12);
+      }
+    } else if (w.type === 'bomb'){
+      this.spawnBomb(c, muzzle, w);
+      sfx('ui', 0.2);
+    }
+  }
+
+  // find the most nose-on enemy for the player's missiles when no lock yet
+  bestForwardTarget(c){
+    const fwd = TMP.set(0, 0, 1).applyQuaternion(c.group.quaternion);
+    let best = null, bestDot = 0.5;
+    for (const o of this.craft){
+      if (!o.alive || o.team === c.team) continue;
+      const to = TMP2.set(o.pos.x - c.pos.x, o.pos.y - c.pos.y, o.pos.z - c.pos.z);
+      const d = to.length(); if (d < 1 || d > 3500) continue;
+      const dot = to.multiplyScalar(1 / d).dot(fwd);
+      if (dot > bestDot){ bestDot = dot; best = o; }
+    }
+    for (const cc of this.carriers){
+      if (!cc.alive || cc.team === c.team) continue;
+      const to = TMP2.set(cc.pos.x - c.pos.x, cc.pos.y - c.pos.y, cc.pos.z - c.pos.z);
+      const d = to.length(); if (d < 1 || d > 4000) continue;
+      const dot = to.multiplyScalar(1 / d).dot(fwd);
+      if (dot > bestDot){ bestDot = dot; best = cc; }
+    }
+    return best;
+  }
+
+  // ---- projectile spawns ----
+  spawnBullet(c, pos, dir, w){
+    const geom = Sim.bulletGeom || (Sim.bulletGeom = new THREE.SphereGeometry(0.6, 6, 4));
+    // Tracer materials are SHARED per colour (constant colour/opacity), so firing a stream
+    // of rounds allocates no materials and the renderer can batch them. Previously every
+    // single bullet built — and on death disposed — two materials, which thrashed the GC
+    // and the GPU material cache under sustained auto-turret fire.
+    const tracer = w.tracer || '#fff2a8';
+    // per-instance (not static): teardown disposes scene materials, so a cross-battle
+    // static cache would hand the next battle already-disposed materials.
+    const cache = this.bulletMats || (this.bulletMats = new Map());
+    let pair = cache.get(tracer);
+    if (!pair){
+      const col = new THREE.Color(tracer);
+      pair = {
+        solid: new THREE.MeshBasicMaterial({ color: col }),
+        trail: new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.6 }),
+      };
+      cache.set(tracer, pair);
+    }
+    const mesh = new THREE.Mesh(geom, pair.solid);
+    mesh.position.copy(pos);
+    // a stretched tracer trail
+    const trail = new THREE.Mesh(
+      Sim.trailGeom || (Sim.trailGeom = new THREE.CylinderGeometry(0.18, 0.18, 1, 5)),
+      pair.trail
+    );
+    trail.rotation.x = Math.PI / 2;
+    trail.scale.z = 14;
+    trail.position.copy(pos);
+    trail.quaternion.copy(c.group.quaternion);
+    this.scene.add(mesh); this.scene.add(trail);
+    this.bullets.push({
+      mesh, trail, team: c.team, owner: c,
+      pos: mesh.position, vel: dir.clone().multiplyScalar(w.speed || 1200).add(c.vel),
+      dmg: w.dmg, splash: w.splash || 0, life: 2.6,
+    });
+  }
+
+  spawnMissile(c, pos, fwd, w, target){
+    const grp = new THREE.Group();
+    // one shared steel material per round drives body + nose + fins; flame is its own.
+    const skin = new THREE.MeshStandardMaterial({ color: 0xdfe3e8, metalness: 0.5, roughness: 0.45 });
+    const body = new THREE.Mesh(
+      Sim.missileGeom || (Sim.missileGeom = new THREE.CylinderGeometry(0.2, 0.2, 3.0, 9)), skin);
+    body.rotation.x = Math.PI / 2; grp.add(body);
+    const nose = new THREE.Mesh(
+      Sim.missileNoseGeom || (Sim.missileNoseGeom = new THREE.ConeGeometry(0.2, 0.95, 10)), skin);
+    nose.rotation.x = Math.PI / 2; nose.position.z = 1.95; grp.add(nose);
+    const finGeom = Sim.missileFinGeom || (Sim.missileFinGeom = new THREE.BoxGeometry(0.035, 0.55, 0.7));
+    for (let f = 0; f < 4; f++){ const fin = new THREE.Mesh(finGeom, skin); fin.position.set(0, 0.42, -1.18);
+      const piv = new THREE.Group(); piv.add(fin); piv.rotation.z = f * Math.PI / 2; grp.add(piv); }
+    const flame = new THREE.Mesh(
+      Sim.flameGeom || (Sim.flameGeom = new THREE.ConeGeometry(0.34, 2.4, 8)),
+      new THREE.MeshBasicMaterial({ color: 0xffd070, transparent: true, opacity: 0.9 })
+    );
+    flame.rotation.x = -Math.PI / 2; flame.position.z = -2.2; grp.add(flame);
+    grp.position.copy(pos);
+    grp.quaternion.copy(c.group.quaternion);
+    this.scene.add(grp);
+    const spd = w.speed || 600;
+    this.missiles.push({
+      mesh: grp, flame, team: c.team, owner: c,
+      pos: grp.position, vel: fwd.clone().multiplyScalar(spd).add(c.vel.clone().multiplyScalar(0.3)),
+      speed: spd, dmg: w.dmg, splash: w.splash || 0, turn: w.turn || 2.5,
+      kind: w.key, target, ballistic: false, life: 9, alive: true, armTime: 0.25,
+    });
+  }
+
+  spawnBomb(c, pos, w){
+    const grp = new THREE.Group();
+    const skin = new THREE.MeshStandardMaterial({ color: 0x8a6bbf, metalness: 0.35, roughness: 0.55 });
+    const body = new THREE.Mesh(
+      Sim.bombGeom || (Sim.bombGeom = new THREE.CylinderGeometry(0.36, 0.36, 1.9, 10)), skin);
+    body.rotation.x = Math.PI / 2; grp.add(body);
+    const nose = new THREE.Mesh(
+      Sim.bombNoseGeom || (Sim.bombNoseGeom = new THREE.ConeGeometry(0.36, 0.95, 10)), skin);
+    nose.rotation.x = Math.PI / 2; nose.position.z = 1.4; grp.add(nose);
+    const finGeom = Sim.bombFinGeom || (Sim.bombFinGeom = new THREE.BoxGeometry(0.05, 0.52, 0.6));
+    for (let f = 0; f < 4; f++){ const fin = new THREE.Mesh(finGeom, skin); fin.position.set(0, 0.5, -0.98);
+      const piv = new THREE.Group(); piv.add(fin); piv.rotation.z = f * Math.PI / 2 + Math.PI / 4; grp.add(piv); }
+    grp.position.copy(pos);
+    grp.quaternion.copy(c.group.quaternion);
+    this.scene.add(grp);
+    this.missiles.push({
+      mesh: grp, flame: null, team: c.team, owner: c,
+      pos: grp.position, vel: c.vel.clone(),
+      speed: 0, dmg: w.dmg, splash: w.splash || 40, turn: 0,
+      kind: w.key, target: null, ballistic: true, life: 14, alive: true, armTime: 0.4,
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  //  ORDNANCE UPDATES
+  // ---------------------------------------------------------------------
+  updateBullets(dt){
+    for (let i = this.bullets.length - 1; i >= 0; i--){
+      const b = this.bullets[i];
+      b.life -= dt;
+      const prev = TMP.copy(b.pos);
+      b.pos.addScaledVector(b.vel, dt);
+      // orient trail along travel
+      if (b.trail){ b.trail.position.copy(b.pos); }
+      // collision: segment vs craft/carrier spheres
+      let hit = null;
+      for (const o of this.craft){
+        if (!o.alive || o.team === b.team) continue;
+        if (this.segHitsCraft(prev, b.pos, o)){ hit = o; break; }
+      }
+      if (!hit) for (const cc of this.carriers){
+        if (!cc.alive || cc.team === b.team) continue;
+        if (this.segHitsCarrier(prev, b.pos, cc)){ hit = cc; break; }
+      }
+      // ground
+      const surf = this.surfaceHeight(b.pos.x, b.pos.z);
+      if (!hit && b.pos.y <= surf + 0.5){ hit = 'ground'; }
+
+      if (hit || b.life <= 0){
+        if (hit && hit !== 'ground'){
+          this.damage(hit, b.dmg, b.owner, true);
+          this.spawnSpark(b.pos, b.team === 0 ? 0x39ff88 : 0xff8844);
+          sfx('hit', hit === this.player ? 0.3 : 0.05);
+          if (b.splash) this.splashDamage(b.pos, b.splash, b.dmg * 0.4, b.owner, b.team);
+        } else if (hit === 'ground'){
+          this.spawnSpark(b.pos, 0xbbaa88);
+        }
+        this.removeBullet(i);
+      }
+    }
+  }
+
+  removeBullet(i){
+    const b = this.bullets[i];
+    this.scene.remove(b.mesh);
+    if (b.trail) this.scene.remove(b.trail);
+    // materials are shared from the per-colour cache (see spawnBullet) — never dispose here
+    this.bullets.splice(i, 1);
+  }
+
+  updateMissiles(dt){
+    for (let i = this.missiles.length - 1; i >= 0; i--){
+      const m = this.missiles[i];
+      m.life -= dt; m.armTime -= dt;
+      if (m.ballistic){
+        m.vel.y -= 9.80665 * dt;
+        m.vel.multiplyScalar(1 - 0.02 * dt);  // light air drag
+      } else {
+        // homing toward target (flares can decoy IR)
+        let tgt = m.target;
+        // flare decoy: IR missiles may re-target a nearby friendly-to-target flare
+        if (m.kind === 'ir'){
+          for (const fl of this.flares){
+            if (!fl.alive) continue;
+            const d = TMP.set(fl.pos.x - m.pos.x, fl.pos.y - m.pos.y, fl.pos.z - m.pos.z).length();
+            if (d < 110 && Math.random() < 0.6 * dt){ m.decoyed = fl; }
+          }
+          if (m.decoyed && m.decoyed.alive) tgt = m.decoyed;
+        }
+        if (tgt && (tgt.alive)){
+          homeMissile({ position: m.pos, vel: m.vel, speed: m.speed }, { position: tgt.pos, vel: tgt.vel || { x: 0, y: 0, z: 0 }, alive: true }, m.turn, dt);
+        }
+        // keep up to speed
+        const sp = m.vel.length() || 1;
+        m.vel.multiplyScalar(m.speed / sp);
+        // orient mesh to velocity
+        if (sp > 1){ m.mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), TMP.copy(m.vel).normalize()); }
+      }
+      const prev = TMP2.copy(m.pos);
+      m.pos.addScaledVector(m.vel, dt);
+
+      // detonation checks
+      let det = false, at = m.pos;
+      if (m.armTime <= 0){
+        for (const o of this.craft){
+          if (!o.alive || o.team === m.team) continue;
+          if (this.segHitsCraft(prev, m.pos, o, 6)){ det = true; at = o.pos; break; }
+        }
+        if (!det) for (const cc of this.carriers){
+          if (!cc.alive || cc.team === m.team) continue;
+          if (this.segHitsCarrier(prev, m.pos, cc, 10)){ det = true; at = cc.pos; break; }
+        }
+      }
+      const surf = this.surfaceHeight(m.pos.x, m.pos.z);
+      if (!det && m.pos.y <= surf + 1){ det = true; at = TMP3.set(m.pos.x, surf, m.pos.z); }
+
+      if (det || m.life <= 0){
+        if (det){
+          this.spawnExplosion(at, m.splash > 40 ? 1.5 : 1);
+          this.splashDamage(at, m.splash, m.dmg, m.owner, m.team);
+          sfx('boom', 0.4);
+        }
+        this.removeMissile(i);
+      }
+    }
+  }
+
+  removeMissile(i){
+    const m = this.missiles[i];
+    this.scene.remove(m.mesh);
+    this.missiles.splice(i, 1);
+  }
+
+  // ---- TORPEDOES ----
+  // A torpedo is its own slow ordnance that RUNS along the sea surface toward a surface vessel —
+  // launched by an aircraft (aerial torpedo) or a warship's deck tubes (updateTorpedoMounts). It
+  // gets a dedicated pipeline (not the missile loop) precisely because a missile detonates the
+  // instant it touches the water, whereas a torpedo intentionally rides the waterline.
+  spawnTorpedo(c, pos, dir, w, target){
+    const grp = new THREE.Group();
+    const skin = this.torpedoMat || (this.torpedoMat = new THREE.MeshStandardMaterial({ color: 0x2b3138, metalness: 0.5, roughness: 0.5 }));
+    const body = new THREE.Mesh(Sim.torpedoGeom || (Sim.torpedoGeom = new THREE.CylinderGeometry(0.55, 0.55, 5.2, 10)), skin);
+    body.rotation.x = Math.PI / 2; grp.add(body);
+    const nose = new THREE.Mesh(Sim.torpedoNoseGeom || (Sim.torpedoNoseGeom = new THREE.ConeGeometry(0.55, 1.2, 10)), skin);
+    nose.rotation.x = Math.PI / 2; nose.position.z = 3.1; grp.add(nose);
+    // a pale foam wake streaking astern along the surface (lies flat; trails with the run heading)
+    const wmat = this.wakeMat || (this.wakeMat = new THREE.MeshBasicMaterial({ color: 0xd6ecff, transparent: true, opacity: 0.34, depthWrite: false, side: THREE.DoubleSide }));
+    const wake = new THREE.Mesh(Sim.wakeGeom || (Sim.wakeGeom = new THREE.PlaneGeometry(3.2, 30)), wmat);
+    wake.rotation.x = -Math.PI / 2; wake.position.set(0, 0.2, -15); grp.add(wake);
+    grp.position.copy(pos);
+    this.scene.add(grp);
+    const sp = w.torpSpeed || 100;
+    let hx = dir.x, hz = dir.z, hl = Math.hypot(hx, hz);
+    if (hl < 1e-4){
+      // launch heading is near-vertical (a torpedo-bomber nosed straight up/down): fall back to the
+      // firer's horizontal forward bearing instead of the degenerate (0,0)→due-north default.
+      const f = new THREE.Vector3(0, 0, 1).applyQuaternion(c.group.quaternion);
+      hx = f.x; hz = f.z; hl = Math.hypot(hx, hz) || 1;
+    }
+    const range = w.torpRange || w.turretRange || 3200;
+    // torpedoes only chase things on the water — if handed an airborne lock, find a surface target.
+    const tgt = (target && target.alive && this.isSurface(target)) ? target : this.nearestSurfaceEnemy(c.team, pos, range);
+    this.torpedoes.push({
+      mesh: grp, team: c.team, owner: c, pos: grp.position,
+      vel: new THREE.Vector3(hx / hl * sp, 0, hz / hl * sp),
+      speed: sp, dmg: w.dmg, splash: w.splash || 60, turn: w.turn || 1.0,
+      // live long enough to actually cover the run range (+30% slack for homing turns),
+      // clamped so a fast torpedo still gets a sensible lifetime.
+      runDepth: w.runDepth || 0.15, range, target: tgt, life: clamp(range / sp * 1.3, 8, 30), arm: 0.4,
+    });
+    sfx('ui', c.isPlayer ? 0.22 : 0.08);
+  }
+
+  updateTorpedoes(dt){
+    for (let i = this.torpedoes.length - 1; i >= 0; i--){
+      const t = this.torpedoes[i];
+      t.life -= dt; if (t.arm > 0) t.arm -= dt;
+      // re-acquire if the target died or was never set
+      if (!t.target || !t.target.alive) t.target = this.nearestSurfaceEnemy(t.team, t.pos, t.range);
+      // home on the horizontal plane at the turn rate, then run at constant speed
+      let heading = Math.atan2(t.vel.x, t.vel.z);
+      if (t.target && t.target.alive){
+        const dx = t.target.pos.x - t.pos.x, dz = t.target.pos.z - t.pos.z;
+        let dA = Math.atan2(dx, dz) - heading;
+        while (dA > Math.PI) dA -= Math.PI * 2; while (dA < -Math.PI) dA += Math.PI * 2;
+        heading += clamp(dA, -t.turn * dt, t.turn * dt);
+      }
+      t.vel.set(Math.sin(heading) * t.speed, 0, Math.cos(heading) * t.speed);
+      const prev = TMP2.copy(t.pos);
+      t.pos.x += t.vel.x * dt; t.pos.z += t.vel.z * dt;
+      // ride the waterline: settle just below the surface (half-submerged), descending fast if air-dropped
+      const runY = this.surfaceHeight(t.pos.x, t.pos.z) - t.runDepth;
+      t.pos.y += clamp(runY - t.pos.y, -45 * dt, 18 * dt);
+      t.mesh.position.copy(t.pos);
+      t.mesh.rotation.y = heading;
+
+      // detonate on a surface vessel (never on the open water — it lives there). Armed after launch.
+      let det = false, at = t.pos;
+      if (t.arm <= 0){
+        for (const cc of this.carriers){
+          if (!cc.alive || cc.team === t.team) continue;
+          if (this.segHitsCarrier(prev, t.pos, cc, 6)){ det = true; at = cc.pos; break; }
+        }
+        if (!det) for (const o of this.craft){
+          if (!o.alive || o.team === t.team || !this.isSurface(o)) continue;
+          if (this.segHitsCraft(prev, t.pos, o, 5)){ det = true; at = o.pos; break; }
+        }
+      }
+      if (det || t.life <= 0){
+        if (det){
+          const surf = this.surfaceHeight(at.x, at.z);
+          this.spawnExplosion(TMP3.set(at.x, surf + 2, at.z), 1.7);
+          this.splashDamage(at, t.splash, t.dmg, t.owner, t.team);
+          sfx('boom', 0.5);
+        }
+        this.removeTorpedo(i);
+      }
+    }
+  }
+
+  removeTorpedo(i){
+    this.scene.remove(this.torpedoes[i].mesh);
+    // geometry is shared-static; materials are the per-battle cache (disposed in teardown).
+    this.torpedoes.splice(i, 1);
+  }
+
+  // a vessel sits on/at the water: carriers always; a craft only when near the local sea surface
+  // (so a torpedo never tries to chase — or hit — an airborne aircraft).
+  isSurface(o){
+    if (o.isCarrier) return true;
+    return (o.pos.y - this.surfaceHeight(o.pos.x, o.pos.z)) <= 14;
+  }
+
+  // nearest enemy SURFACE vessel to `from` within range (ships always; sea-level craft too).
+  nearestSurfaceEnemy(team, from, range){
+    let best = null, bd = range * range;
+    for (const cc of this.carriers){
+      if (!cc.alive || cc.team === team) continue;
+      const dx = cc.pos.x - from.x, dz = cc.pos.z - from.z, d2 = dx * dx + dz * dz;
+      if (d2 < bd){ bd = d2; best = cc; }
+    }
+    for (const o of this.craft){
+      if (!o.alive || o.team === team || !this.isSurface(o)) continue;
+      const dx = o.pos.x - from.x, dz = o.pos.z - from.z, d2 = dx * dx + dz * dz;
+      if (d2 < bd){ bd = d2; best = o; }
+    }
+    return best;
+  }
+
+  // a warship's deck torpedo tubes: train on the nearest enemy ship and launch on a long cooldown.
+  // Mirrors updateTurrets (cosmetic node traverse + launch from the tube tip) but spawns a sea-
+  // running torpedo, not a shell, and only ever engages SURFACE vessels.
+  updateTorpedoMounts(cc, dt){
+    const mounts = cc.torpedoMounts;
+    if (!mounts || !mounts.length) return;
+    const q = cc.group.quaternion;
+    for (const m of mounts){
+      const w = m.w;
+      if (w.cool > 0) w.cool -= dt;
+      const range = w.torpRange || w.turretRange || 3000;
+      const tgt = this.nearestSurfaceEnemy(cc.team, cc.pos, range);
+      const node = m.node;
+      const base = _TV.set(0, 0, 0);
+      if (node) base.copy(node.position).multiplyScalar(cc.group.scale.x || 1).applyQuaternion(q);
+      base.add(cc.pos);
+      if (!tgt) continue;
+      const aimW = _TV2.set(tgt.pos.x - base.x, 0, tgt.pos.z - base.z);
+      if (aimW.lengthSq() < 1e-6) continue;
+      aimW.normalize();
+      // slew the tube toward the bearing (yaw only — the torpedo homes after launch)
+      if (node){
+        const localAim = _TV3.copy(aimW).applyQuaternion(_TQ2.copy(q).invert()).normalize();
+        _TQ.setFromUnitVectors(_ZAXIS, localAim);
+        node.quaternion.rotateTowards(_TQ, 1.1 * dt);
+      }
+      if (w.cool > 0) continue;
+      const barrelW = node
+        ? _TV3.set(0, 0, 1).applyQuaternion(_TQ2.multiplyQuaternions(q, node.quaternion)).normalize()
+        : aimW;
+      if (barrelW.dot(aimW) < 0.94) continue;   // roughly trained on the target before launch
+      const muzzle = _TV.copy(base).addScaledVector(barrelW, 3 * (cc.group.scale.x || 1));
+      this.spawnTorpedo(cc, muzzle, barrelW, w, tgt);
+      w.cool = 1 / Math.max(0.05, w.rof);
+    }
+  }
+
+  updateFlares(dt){
+    for (let i = this.flares.length - 1; i >= 0; i--){
+      const f = this.flares[i];
+      f.life -= dt;
+      f.vel.y -= 4 * dt;
+      f.pos.addScaledVector(f.vel, dt);
+      f.mesh.material.opacity = clamp(f.life / 2, 0, 1);
+      if (f.life <= 0){ f.alive = false; this.scene.remove(f.mesh); f.mesh.material.dispose(); this.flares.splice(i, 1); }
+    }
+  }
+
+  updateFX(dt){
+    for (let i = this.fx.length - 1; i >= 0; i--){
+      const e = this.fx[i];
+      e.life -= dt;
+      e.t += dt;
+      if (e.kind === 'spark'){
+        for (const p of e.parts){ p.pos.addScaledVector(p.vel, dt); p.vel.multiplyScalar(0.92); }
+        e.mesh.geometry.attributes.position.needsUpdate = true;
+        const arr = e.mesh.geometry.attributes.position.array;
+        e.parts.forEach((p, k) => { arr[k * 3] = p.pos.x; arr[k * 3 + 1] = p.pos.y; arr[k * 3 + 2] = p.pos.z; });
+        e.mesh.material.opacity = clamp(e.life / e.maxLife, 0, 1);
+      } else if (e.kind === 'boom'){
+        const s = lerp(e.from, e.to, 1 - e.life / e.maxLife);
+        e.mesh.scale.setScalar(s);
+        e.mesh.material.opacity = clamp(e.life / e.maxLife, 0, 1) * 0.9;
+        if (e.light) e.light.intensity = clamp(e.life / e.maxLife, 0, 1) * 6;
+      }
+      if (e.life <= 0){
+        this.scene.remove(e.mesh);
+        if (e.mesh.material) e.mesh.material.dispose();
+        if (e.light) e.light.intensity = 0;        // return the pooled light (keep it in the scene)
+        this.fx.splice(i, 1);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  //  HIT TESTS
+  // ---------------------------------------------------------------------
+  segHitsCraft(a, b, o, pad = 0){
+    const r = (o.stats.bbox ? Math.max(o.stats.bbox.size.x, o.stats.bbox.size.z) * 0.6 : 8) * (o.scaleMul || 1) + pad;
+    return distSegPoint(a, b, o.pos) <= r;
+  }
+  segHitsCarrier(a, b, o, pad = 0){
+    // carriers are big oriented boxes; approximate sphere. A design carrier's radius is
+    // computed from its hull × SHIP_SCALE (o.hitR) so it tracks the rendered size; the
+    // default slab carrier (no design) keeps its fixed 150.
+    const r = (o.hitR || (o.design ? 60 : 150)) + pad;
+    return distSegPoint(a, b, o.pos) <= r;
+  }
+
+  // ---------------------------------------------------------------------
+  //  DAMAGE / SPLASH / KILL
+  // ---------------------------------------------------------------------
+  damage(o, amount, attacker, allowArmor){
+    if (!o.alive) return;
+    let dmg = amount;
+    if (allowArmor && o.armor){
+      // armor soaks a fraction proportional to armor vs total HP
+      const soak = clamp(o.armor / (o.maxHp || 1), 0, 0.7);
+      dmg *= (1 - soak);
+    }
+    // FLEET SCREEN — a major hit on a surface unit steaming with same-type escorts is
+    // partly soaked by the formation's massed armour & point-defence (sisters shield it).
+    if (o.isCarrier && o.escortCount > 0 && dmg >= SHIP_MAJOR_HIT){
+      dmg *= (1 - Math.min(0.6, 0.2 * o.escortCount));
+    }
+    o.hp -= dmg;
+    if (o.isPlayer){ this.shake = Math.min(0.8, this.shake + Math.min(0.4, dmg / 120)); this.flashMsg('HIT', 'bad'); }
+    if (o.hp <= 0){
+      if (o.isCarrier) this.killCarrier(o, attacker);
+      else this.killCraft(o, 'Shot down', attacker);
+    }
+  }
+
+  splashDamage(center, radius, dmg, attacker, team){
+    if (radius <= 0){ return; }
+    for (const o of this.craft){
+      if (!o.alive || o.team === team) continue;
+      const d = Math.hypot(o.pos.x - center.x, o.pos.y - center.y, o.pos.z - center.z);
+      if (d < radius){ this.damage(o, dmg * (1 - d / radius), attacker, true); }
+    }
+    for (const cc of this.carriers){
+      if (!cc.alive || cc.team === team) continue;
+      const d = Math.hypot(cc.pos.x - center.x, cc.pos.y - center.y, cc.pos.z - center.z);
+      if (d < radius + 60){ this.damage(cc, dmg * (1 - d / (radius + 60)) * 1.5, attacker, false); }
+    }
+  }
+
+  killCraft(c, reason, attacker){
+    if (!c.alive) return;
+    c.alive = false; c.dead = true;
+    this.spawnExplosion(c.pos, 1.8);
+    sfx('boom', c.isPlayer ? 0.6 : 0.3);
+    // drop the wreck
+    this.scene.remove(c.group);
+    // scoring
+    if (attacker === this.player && !c.isPlayer){ this.result.kills++; this.result.score += 100 + Math.round((c.stats.cost || 0) / 100); toast(`${c.name} destroyed`, 'good'); }
+    if (c.isPlayer){
+      this.result.deaths++;
+      this.flashMsg(reason.toUpperCase(), 'bad');
+      this.endBattle(false, reason);
+    } else if (this.lock.target && this.lock.target._src === c){   // lock holds a lockView, not the craft — compare its source
+      this.lock.reset();
+    }
+  }
+
+  killCarrier(cc, attacker){
+    if (!cc.alive) return;
+    cc.alive = false;
+    // multi-blast
+    for (let i = 0; i < 5; i++){
+      const off = new THREE.Vector3((Math.random() - 0.5) * 120, Math.random() * 30, (Math.random() - 0.5) * 200);
+      this.spawnExplosion(TMP.copy(cc.pos).add(off), 2.4);
+    }
+    sfx('boom', 0.7);
+    setTimeout(() => { if (cc.mesh) this.scene.remove(cc.mesh); }, 200);
+    toast(`${cc.name} sunk!`, cc.team === 1 ? 'good' : 'bad');
+    if (attacker === this.player) this.result.score += 800;
+  }
+
+  // ---------------------------------------------------------------------
+  //  FLARES / COUNTERMEASURES
+  // ---------------------------------------------------------------------
+  firePlayerFlare(){ this.fireFlare(this.player); }
+  fireFlare(c){
+    if (!c || !c.alive || c.flares <= 0) return;
+    c.flares -= Math.min(4, c.flares);
+    for (let i = 0; i < 3; i++){
+      const mesh = new THREE.Mesh(
+        Sim.flareGeom2 || (Sim.flareGeom2 = new THREE.SphereGeometry(0.6, 6, 4)),
+        new THREE.MeshBasicMaterial({ color: 0xffd060, transparent: true, opacity: 1 })
+      );
+      mesh.position.copy(c.pos);
+      this.scene.add(mesh);
+      const back = TMP.set(0, 0, -1).applyQuaternion(c.group.quaternion);
+      this.flares.push({
+        mesh, pos: mesh.position, team: c.team, alive: true, life: 2,
+        vel: c.vel.clone().multiplyScalar(0.5).add(back.multiplyScalar(20)).add(new THREE.Vector3((Math.random() - 0.5) * 30, (Math.random() - 0.5) * 20, (Math.random() - 0.5) * 30)),
+      });
+    }
+    if (c.isPlayer){ sfx('ui', 0.3); this.flashMsg('FLARES', 'warn'); }
+  }
+
+  jettison(c){
+    if (!c || !c.alive || c.dropTanksGone) return;
+    const tanks = c.group.userData.dropTanks || [];
+    if (!tanks.length){ if (c.isPlayer) this.flashMsg('NO DROP TANKS', 'warn'); return; }
+    for (const t of tanks){ t.visible = false; }
+    c.dropTanksGone = true;
+    // shed the drag/mass of drop tanks by recomputing a leaner stat profile
+    const lean = { ...c.design, parts: c.design.parts.filter(p => !(PARTS[p.key] && PARTS[p.key].jettison)) };
+    const ns = computeStats(lean);
+    // splice: keep current hp/fuel ratios but adopt lighter mass/drag/agility
+    c.stats = ns;
+    c.fuel = Math.min(c.fuel, ns.fuelMass);
+    c.maxFuel = ns.fuelMass || c.maxFuel;
+    if (c.isPlayer){ sfx('ui', 0.3); this.flashMsg('DROP TANKS RELEASED', 'good'); toast('Drop tanks jettisoned — lighter & cleaner', 'good'); }
+  }
+
+  // ---------------------------------------------------------------------
+  //  NAVAL SQUADRONS — group surface units by team + type. Same-type units form
+  //  up (a flotilla): they steam fast together in line-abreast (updateCarrier) and
+  //  shield each other from major attacks (damage()). A lone unit fights solo.
+  // ---------------------------------------------------------------------
+  updateFleets(dt){
+    const groups = new Map();
+    for (const cc of this.carriers){
+      if (!cc.alive) continue;
+      const key = cc.team + '|' + (cc.design ? (cc.design.name || cc.design.id || 'ship') : 'default');
+      let g = groups.get(key);
+      if (!g){ g = []; groups.set(key, g); }
+      g.push(cc);
+    }
+    for (const ships of groups.values()){
+      // shielding screen: how many same-type mates are steaming close by
+      for (const a of ships){
+        let n = 0;
+        for (const b of ships){
+          if (b !== a && Math.hypot(a.pos.x - b.pos.x, a.pos.z - b.pos.z) < FLEET_SCREEN) n++;
+        }
+        a.escortCount = n;
+      }
+      if (ships.length < 2){ ships[0].inFleet = false; ships[0].fleetLeader = null; ships[0].fleetFormed = false; ships[0].formation = fleetFormation(ships[0].shipSpeed || 24); continue; }
+      // the first living same-type unit leads; the rest form on it in the speed-chosen formation.
+      const leader = ships[0];
+      const form = fleetFormation(leader.shipSpeed || 24);
+      const FF = FORMATIONS[form] || FORMATIONS.wedge;
+
+      // FORMED-UP CHECK — are all followers on station (within tolerance of their slots)?
+      // Computed in the leader's heading frame, the same geometry updateCarrier steers to.
+      // Latches once true so the squadron commits to the charge and won't flicker speed.
+      _HD.set(leader.vel.x, 0, leader.vel.z);
+      if (_HD.lengthSq() < 0.5) _HD.set(0, 0, leader.team === 1 ? -1 : 1);
+      _HD.normalize();
+      let formedNow = true;
+      for (let i = 1; i < ships.length; i++){
+        const rank = Math.ceil(i / 2), side = (i % 2) ? 1 : -1;
+        const slotX = leader.pos.x + _HD.z * side * rank * FF.side + _HD.x * rank * FF.fwd;
+        const slotZ = leader.pos.z - _HD.x * side * rank * FF.side + _HD.z * rank * FF.fwd;
+        if (Math.hypot(ships[i].pos.x - slotX, ships[i].pos.z - slotZ) > FLEET_FORM_TOL){ formedNow = false; break; }
+      }
+      leader.fleetFormed = !!(leader.fleetFormed || formedNow);
+
+      for (let i = 0; i < ships.length; i++){
+        ships[i].inFleet = true;
+        ships[i].fleetLeader = leader;
+        ships[i].slotIndex = i;        // 0 = leader, 1..n = formation slots
+        ships[i].formation = form;     // the whole squadron flies the leader's formation
+        ships[i].fleetFormed = leader.fleetFormed;   // once formed, the whole squadron charges
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  //  CARRIERS
+  // ---------------------------------------------------------------------
+  updateCarrier(cc, dt){
+    const F = FORMATIONS[cc.formation] || FORMATIONS.wedge;
+    // squadron cruise scales with the formation (blitz charges fast, crescent creeps), but every
+    // SHIP keeps way on at all times — floored at 60% of the ship max (a larger crescent-class
+    // ship at 70%) so heavy ships never crawl. The non-ship slab carrier just steams (6 m/s).
+    let sp = (cc.isShip ? (cc.shipSpeed || 24) : 6) * (cc.inFleet ? F.speedMul : 1);
+    if (cc.isShip) sp = Math.max(sp, (cc.formation === 'crescent' ? SHIP_FLOOR_BIG : SHIP_FLOOR) * (cc.shipSpeed || 24));
+    // FORMED UP → drive forward at maximum (flank) speed. While still assembling, the
+    // squadron only cruises; once every ship is on station it surges ahead together.
+    if (cc.inFleet && cc.fleetFormed) sp *= FLEET_CHARGE_MUL;
+
+    if (cc.inFleet && cc.fleetLeader && cc.fleetLeader !== cc && cc.fleetLeader.alive){
+      // FOLLOWER: hold a station in the squadron's chosen FORMATION, relative to the leader in
+      // the fleet heading frame. blitz/wedge trail BEHIND the leader (arrowhead); a crescent's
+      // wings sweep AHEAD to envelop. rank = how far out from the spine, side = which wing.
+      const lead = cc.fleetLeader;
+      _HD.set(lead.vel.x, 0, lead.vel.z);
+      if (_HD.lengthSq() < 0.5) _HD.set(0, 0, cc.team === 1 ? -1 : 1);
+      _HD.normalize();
+      const rank = Math.ceil(cc.slotIndex / 2), side = (cc.slotIndex % 2) ? 1 : -1;
+      const slotX = lead.pos.x + _HD.z * side * rank * F.side + _HD.x * rank * F.fwd;   // right = (hz,0,-hx)
+      const slotZ = lead.pos.z - _HD.x * side * rank * F.side + _HD.z * rank * F.fwd;
+      cc.vel.x = clamp(lead.vel.x + (slotX - cc.pos.x) * 0.7, -sp * 1.9, sp * 1.9);
+      cc.vel.z = clamp(lead.vel.z + (slotZ - cc.pos.z) * 0.7, -sp * 1.9, sp * 1.9);
+    } else if (cc.isShip){
+      // LEADER / SOLO ship: charge the nearest enemy vessel and close to the FORMATION's
+      // standoff — a blitz rams to point-blank; a crescent holds at long range and bombards.
+      let tgt = null, bd = Infinity;
+      for (const o of this.carriers){
+        if (!o.alive || o.team === cc.team || o === cc) continue;
+        const dx = o.pos.x - cc.pos.x, dz = o.pos.z - cc.pos.z, d2 = dx * dx + dz * dz;
+        if (d2 < bd){ bd = d2; tgt = o; }
+      }
+      if (tgt){
+        const dist = Math.sqrt(bd) || 1, tx = (tgt.pos.x - cc.pos.x) / dist, tz = (tgt.pos.z - cc.pos.z) / dist;
+        if (dist > F.standoff){
+          cc.vel.set(tx * sp, 0, tz * sp);                    // charge the target
+        } else {
+          // at the formation's standoff: ORBIT the target at full speed instead of stopping — a
+          // warship keeps way on. tangent (tz,-tx) for the circle + a radial nudge to hold range.
+          const along = (dist - F.standoff) * 0.6;
+          let vx = tz * sp + tx * along, vz = -tx * sp + tz * along;
+          const vm = Math.hypot(vx, vz) || 1; cc.vel.set(vx / vm * sp, 0, vz / vm * sp);
+        }
+      } else {
+        // No enemy SHIP to fight — bring the deck guns to bear on the nearest enemy
+        // AIRCRAFT instead: close to an air-defence standoff and orbit there. (The old code
+        // just steamed a fixed default heading, so with no surface target the fleet sailed
+        // straight off the map and never engaged the player.) Clear skies → loiter toward
+        // the map centre rather than wandering to the edge.
+        let air = null, ad = Infinity;
+        for (const o of this.craft){
+          if (!o.alive || o.team === cc.team) continue;
+          const dx = o.pos.x - cc.pos.x, dz = o.pos.z - cc.pos.z, d2 = dx * dx + dz * dz;
+          if (d2 < ad){ ad = d2; air = o; }
+        }
+        if (air){
+          const dist = Math.sqrt(ad) || 1, tx = (air.pos.x - cc.pos.x) / dist, tz = (air.pos.z - cc.pos.z) / dist;
+          const AA_HOLD = 850;
+          if (dist > AA_HOLD){
+            cc.vel.set(tx * sp, 0, tz * sp);                   // close to put it in flak range
+          } else {
+            const along = (dist - AA_HOLD) * 0.6;              // orbit its ground track, keep way on
+            let vx = tz * sp + tx * along, vz = -tx * sp + tz * along;
+            const vm = Math.hypot(vx, vz) || 1; cc.vel.set(vx / vm * sp, 0, vz / vm * sp);
+          }
+        } else {
+          const dc = Math.hypot(cc.pos.x, cc.pos.z) || 1;      // nothing to fight → steam to centre
+          cc.vel.set(-cc.pos.x / dc * sp, 0, -cc.pos.z / dc * sp);
+        }
+      }
+    } else {
+      // LEADER / SOLO carrier: steam along its lane, turning at the map edges. A fleet
+      // leader cruises at squadron speed; a lone carrier keeps its slow spawn velocity.
+      if (Math.abs(cc.pos.x) > 3000) cc.vel.x *= -1;
+      if (cc.inFleet){ cc.vel.x = Math.sign(cc.vel.x || (cc.team === 1 ? -1 : 1)) * sp; cc.vel.z = 0; }
+    }
+    // GUARANTEE: a SHIP always keeps way on — floor the final speed at 60% of max (a larger
+    // crescent-class ship at 70%), whatever the branch above decided. Direction is preserved;
+    // a fully-stopped ship is nudged forward. (Non-ship slab carriers are exempt.)
+    if (cc.isShip){
+      const floor = (cc.formation === 'crescent' ? SHIP_FLOOR_BIG : SHIP_FLOOR) * (cc.shipSpeed || 24);
+      const vlen = Math.hypot(cc.vel.x, cc.vel.z);
+      if (vlen < floor){
+        if (vlen < 0.01) cc.vel.set(0, 0, (cc.team === 1 ? -1 : 1) * floor);
+        else { const s = floor / vlen; cc.vel.x *= s; cc.vel.z *= s; }
+      }
+      // EDGE CONTAINMENT — a ship never charges off the world: reflect any outward velocity
+      // at the boundary so it turns back into the battle area.
+      const EDGE = 2900;
+      if (cc.pos.x >  EDGE && cc.vel.x > 0) cc.vel.x = -Math.abs(cc.vel.x);
+      if (cc.pos.x < -EDGE && cc.vel.x < 0) cc.vel.x =  Math.abs(cc.vel.x);
+      if (cc.pos.z >  EDGE && cc.vel.z > 0) cc.vel.z = -Math.abs(cc.vel.z);
+      if (cc.pos.z < -EDGE && cc.vel.z < 0) cc.vel.z =  Math.abs(cc.vel.z);
+    }
+    cc.pos.addScaledVector(cc.vel, dt);
+    cc.pos.y = this.env.sea ? 4 + Math.sin(this.time * 0.6) * 0.6 : 14;
+    cc.mesh.position.copy(cc.pos);
+    if (cc.vel.lengthSq() > 0.01) cc.mesh.rotation.y = Math.atan2(cc.vel.x, cc.vel.z);
+
+    // point defence
+    cc.pdCool -= dt;
+    // point-defence flak fires from the hull centre — keep it ONLY as a fallback for a
+    // gunless hull (the default slab carrier). A ship with deck guns already engages from
+    // its own barrels via updateTurrets, so skip the centre-fire flak there.
+    if (cc.pdCool <= 0 && (!cc.turrets || cc.turrets.length === 0)){
+      const pd = updateCarrierPD(cc, this.world, dt);
+      if (pd){
+        // fire a flak tracer at the lead point
+        const dir = TMP.set(pd.lead.x - cc.pos.x, pd.lead.y - cc.pos.y, pd.lead.z - cc.pos.z).normalize();
+        const origin = TMP2.copy(cc.pos); origin.y += 24;
+        const w = { dmg: 28, speed: cc.pdSpeed, splash: 8, tracer: '#ff5544' };
+        // create a bullet manually (carrier isn't a craft)
+        const fakeOwner = { team: cc.team, group: cc.mesh, vel: new THREE.Vector3(), pos: origin };
+        const mesh = new THREE.Mesh(Sim.bulletGeom || (Sim.bulletGeom = new THREE.SphereGeometry(0.6, 6, 4)), new THREE.MeshBasicMaterial({ color: 0xff5544 }));
+        mesh.position.copy(origin); this.scene.add(mesh);
+        this.bullets.push({ mesh, trail: null, team: cc.team, owner: cc, pos: mesh.position, vel: dir.multiplyScalar(cc.pdSpeed), dmg: 28, splash: 8, life: 2.5 });
+        cc.pdCool = 0.12;
+        if (Math.random() < 0.2) sfx('cannon', 0.05);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  //  AUTO-TURRETS — defensive turrets that traverse to the nearest enemy
+  //  and fire on their own. Mounted on any craft (the player included); they
+  //  spin idly to scan when nothing is in range. Set up in makeCraft.
+  // ---------------------------------------------------------------------
+  updateTurrets(c, dt){
+    const turrets = c.turrets;
+    if (!turrets || !turrets.length) return;
+    const q = c.group.quaternion;
+    // OPTIMISATION: a ship's guns all sit within metres of each other relative to target
+    // ranges of hundreds–thousands, so scan for the nearest hostile ONCE per ship/frame (from
+    // the hull centre, at the widest gun range) instead of once per gun — a big battleship has
+    // dozens of guns, so this is dozens× fewer O(units) scans. Each gun applies its own range.
+    let _maxR = 0; for (const t of turrets){ const r = t.w.turretRange || 1500; if (r > _maxR) _maxR = r; }
+    const _shared = this.nearestEnemy(c, c.pos, _maxR, true);
+    const _sd2 = _shared ? (_shared.pos.x - c.pos.x) ** 2 + (_shared.pos.y - c.pos.y) ** 2 + (_shared.pos.z - c.pos.z) ** 2 : Infinity;
+    for (const t of turrets){
+      const w = t.w, node = t.node;
+
+      // cooldown / reload tick (mirrors handleFiring)
+      if (w.cool > 0) w.cool -= dt;
+      if (w.reloading > 0){
+        w.reloading -= dt;
+        if (w.reloading <= 0){
+          const take = Math.min(w.clip, w.reserve > 0 ? w.reserve : w.clip);
+          w.ammo = c.isAI ? w.clip : take;
+          if (!c.isAI && w.reserve > 0) w.reserve -= take; else if (c.isAI) w.reserve = w.clip;
+        }
+      }
+
+      // turret muzzle base in world space: node-local mount rotated into the body, + craft pos.
+      // node.position is in the (unscaled) parent-local frame, so lift it by the group scale
+      // first — carriers render at 6×, aircraft at 1× (no-op there).
+      const base = _TV.set(0, 0, 0);
+      if (node) base.copy(node.position).multiplyScalar(c.group.scale.x || 1).applyQuaternion(q);
+      base.add(c.pos);
+
+      // engage the shared per-ship nearest-hostile (scanned once above) only if it's within
+      // THIS gun's own range. ANY gun may target enemy SHIPS too (a player-flown warship's
+      // main guns can shell an enemy carrier).
+      const range = w.turretRange || 1500;
+      const tgt = (_shared && _sd2 <= range * range) ? _shared : null;
+      t.target = tgt;
+
+      // A turret ONLY traverses to an enemy. With nothing in range it holds its current
+      // bearing (no idle sweep / spinning). Aim at the target's lead point in WORLD space.
+      if (!tgt) continue;
+      const lead = leadPoint(base, { position: tgt.pos, vel: tgt.vel, alive: true }, w.speed || 820, _turretLead);
+      const aimW = _TV2.set(lead.x - base.x, lead.y - base.y, lead.z - base.z);
+      if (aimW.lengthSq() < 1e-6) aimW.set(0, 0, 1);
+      aimW.normalize();
+
+      // slew the node toward the aim (convert the world aim into the body/parent frame)
+      if (node){
+        const localAim = _TV3.copy(aimW).applyQuaternion(_TQ2.copy(q).invert()).normalize();
+        _TQ.setFromUnitVectors(_ZAXIS, localAim);
+        node.quaternion.rotateTowards(_TQ, 4.0 * dt);
+      }
+
+      if (w.cool > 0 || w.reloading > 0) continue;
+      if (w.ammo <= 0){ if (w.reserve > 0 || c.isAI) w.reloading = w.reload; continue; }
+
+      // only shoot once the barrels are actually pointed near the aim line
+      const barrelW = node
+        ? _TV3.set(0, 0, 1).applyQuaternion(_TQ2.multiplyQuaternions(q, node.quaternion)).normalize()
+        : _TV3.copy(aimW);
+      if (barrelW.dot(aimW) < 0.985) continue;
+
+      // fire a flak round from the muzzle tip along the barrel (+ a touch of spread).
+      // scale the tip offset by the group scale so a 6× carrier turret clears its own barrel.
+      const muzzle = _TV.copy(base).addScaledVector(barrelW, (node ? 1.4 : 6) * (c.group.scale.x || 1));
+      const dir = barrelW.clone();
+      const sp = w.spread || 0;
+      if (sp){ dir.x += (Math.random() - 0.5) * sp * 2; dir.y += (Math.random() - 0.5) * sp * 2; dir.z += (Math.random() - 0.5) * sp * 2; dir.normalize(); }
+      this.spawnBullet(c, muzzle, dir, w);
+      w.cool = 1 / Math.max(0.1, w.rof);
+      w.ammo -= 1;
+      if (w.ammo <= 0 && (w.reserve > 0 || c.isAI)) w.reloading = w.reload;
+      if (Math.random() < 0.25) sfx('cannon', c.isPlayer ? 0.06 : 0.03);
+    }
+  }
+
+  // nearest living hostile to `from` within `range` (squared-distance scan). Aircraft
+  // always count; `includeCarriers` also lets a shooter engage enemy SHIPS — carrier
+  // deck guns use it so a carrier can shell another carrier (and strafe aircraft too).
+  nearestEnemy(c, from, range, includeCarriers){
+    let best = null, bd = range * range;
+    const scan = (list) => {
+      for (const o of list){
+        if (!o.alive || o.team === c.team || o === c) continue;
+        const dx = o.pos.x - from.x, dy = o.pos.y - from.y, dz = o.pos.z - from.z;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < bd){ bd = d2; best = o; }
+      }
+    };
+    scan(this.craft);
+    if (includeCarriers) scan(this.carriers);
+    return best;
+  }
+
+  // ---------------------------------------------------------------------
+  //  LOCK SYSTEM (player) — the headline prediction feature.
+  // ---------------------------------------------------------------------
+  updateLock(dt){
+    const p = this.player;
+    if (!p || !p.alive){ this.lockState = null; return; }
+    const w = p.weapons[p.curWeapon];
+    const origin = TMP.copy(p.pos);
+    // the lock cone follows the AIM reticle (where you point), not the lagging nose,
+    // so you acquire what you look at.
+    const acp = Math.cos(this.aimPitch), asp = Math.sin(this.aimPitch);
+    const fwd = TMP2.set(Math.sin(this.aimYaw) * acp, asp, Math.cos(this.aimYaw) * acp);
+    // candidates: enemy craft + enemy carriers, exposed as {position,vel,alive,team}
+    const candidates = [];
+    for (const o of this.craft){ if (o.alive && o.team !== p.team){ candidates.push(this.lockView(o)); } }
+    for (const cc of this.carriers){ if (cc.alive && cc.team !== p.team){ candidates.push(this.lockView(cc)); } }
+
+    const lockTime = w ? (w.lockTime || 1.2) : 1.2;
+    // the lock builds for any weapon (gun gets a soft firm-up; missiles need it)
+    const ready = !!w;
+    const res = this.lock.update(dt, { origin: { x: origin.x, y: origin.y, z: origin.z }, fwd: { x: fwd.x, y: fwd.y, z: fwd.z }, candidates, lockTime, ready });
+    this.lockState = res;
+    if (res.justLocked){ sfx('lockfull', 0.4); }
+    else if (res.target && res.progress > 0 && res.progress < 1 && Math.random() < dt * 6){ sfx('lock', 0.15); }
+
+    // lockmissile auto-fire on full lock (movie style)
+    if (w && w.type === 'lockmissile' && res.locked && res.target){
+      this.tryFireLockMissile(p, w, p.curWeapon, res.target._src);
+    }
+  }
+
+  // expose a craft/carrier as a lock candidate; carry a back-ref to the real object
+  lockView(o){
+    return { position: o.pos, vel: o.vel || { x: 0, y: 0, z: 0 }, aimY: o.isCarrier ? 24 : 0, alive: o.alive, team: o.team, _src: o };
+  }
+
+  tryFireLockMissile(p, w, idx, target){
+    if (w.cool > 0 || w.reloading > 0) return;
+    if (w.ammo <= 0){ if (w.reserve > 0) w.reloading = w.reload; return; }
+    const muzzle = this.muzzle(p);
+    const fwd = TMP.set(0, 0, 1).applyQuaternion(p.group.quaternion);
+    this.spawnMissile(p, muzzle, fwd, w, target);
+    sfx('missile', 0.32); this.flashMsg('FOX — LOCK MISSILE AWAY', 'warn');
+    this.shake = Math.min(0.6, this.shake + 0.12);
+    w.cool = 1 / Math.max(0.1, w.rof);
+    w.ammo -= 1;
+    if (w.ammo <= 0 && w.reserve > 0) w.reloading = w.reload;
+    this.lock.reset();
+  }
+
+  // ---------------------------------------------------------------------
+  //  CAMERA — chase behind the aircraft, slight lag + shake.
+  // ---------------------------------------------------------------------
+  updateCamera(dt){
+    const p = this.player;
+    if (!p){ return; }
+    // The camera looks ALONG the aim reticle (not the banking nose) so the crosshair
+    // stays screen-centred over an upright horizon while the airframe rolls below it
+    // — the Gravity Front chase view. When dead, the last aim direction is kept.
+    const cp = Math.cos(this.aimPitch), sp = Math.sin(this.aimPitch);
+    const aimFwd = TMP.set(Math.sin(this.aimYaw) * cp, sp, Math.cos(this.aimYaw) * cp);
+    const cm = (p.scaleMul || 1);                            // a piloted ship sits farther from the eye
+    const dollyBack = (30 + clamp(p.speed * 0.03, 0, 16)) * cm;
+    const desired = TMP2.copy(p.pos).addScaledVector(aimFwd, -dollyBack);
+    desired.y += 11 * cm;
+    const surfY = this.surfaceHeight(p.pos.x, p.pos.z);
+    if (desired.y < surfY + 6) desired.y = surfY + 6;        // keep the camera above the ground
+    this.camPos.lerp(desired, 1 - Math.exp(-7 * dt));
+
+    // shake
+    this.shake = Math.max(0, this.shake - dt * 2.2);
+    const sh = this.shake;
+    this.camera.position.copy(this.camPos);
+    this.camera.position.x += (Math.random() - 0.5) * sh * 2.4;
+    this.camera.position.y += (Math.random() - 0.5) * sh * 2.4;
+    this.camera.up.set(0, 1, 0);                             // upright horizon (the plane banks, the view doesn't)
+    if (this.sky) this.sky.position.copy(this.camera.position);   // skybox follows the eye (never clips to a black dome)
+    const look = TMP3.copy(this.camera.position).addScaledVector(aimFwd, 120);
+    this.camera.lookAt(look);
+    // boost narrows the FOV for a speed rush
+    this.camera.fov = lerp(this.camera.fov, p.boost ? 58 : 66, 1 - Math.exp(-4 * dt));
+    this.camera.updateProjectionMatrix();
+  }
+
+  // ---------------------------------------------------------------------
+  //  FX SPAWNERS
+  // ---------------------------------------------------------------------
+  spawnSpark(pos, color){
+    const N = 8;
+    const geo = new THREE.BufferGeometry();
+    const arr = new Float32Array(N * 3);
+    const parts = [];
+    for (let i = 0; i < N; i++){
+      arr[i * 3] = pos.x; arr[i * 3 + 1] = pos.y; arr[i * 3 + 2] = pos.z;
+      parts.push({ pos: pos.clone(), vel: new THREE.Vector3((Math.random() - 0.5) * 40, (Math.random() - 0.5) * 40, (Math.random() - 0.5) * 40) });
+    }
+    geo.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+    const mesh = new THREE.Points(geo, new THREE.PointsMaterial({ color, size: 1.4, transparent: true, opacity: 1 }));
+    this.scene.add(mesh);
+    this.fx.push({ kind: 'spark', mesh, parts, life: 0.5, maxLife: 0.5, t: 0 });
+  }
+
+  spawnExplosion(pos, scale = 1){
+    const mesh = new THREE.Mesh(
+      Sim.boomGeom || (Sim.boomGeom = new THREE.SphereGeometry(1, 12, 10)),
+      new THREE.MeshBasicMaterial({ color: 0xffaa44, transparent: true, opacity: 0.9 })
+    );
+    mesh.position.copy(pos);
+    this.scene.add(mesh);
+    // borrow a free light from the pool (intensity ~0) — no scene add/remove, no recompile
+    let light = null;
+    if (this.boomLights){ light = this.boomLights.find(L => L.intensity < 0.05) || null; if (light) light.position.copy(pos); }
+    this.fx.push({ kind: 'boom', mesh, light, from: 1 * scale, to: 26 * scale, life: 0.6, maxLife: 0.6, t: 0 });
+    this.spawnSpark(pos, 0xffcc66);
+  }
+
+  // ---------------------------------------------------------------------
+  //  OBJECTIVE / END
+  // ---------------------------------------------------------------------
+  checkObjective(dt){
+    if (this.over) return;
+    const type = this.objective.type;
+    const enemiesAlive = this.craft.filter(c => c.alive && c.team !== 0).length;
+    const enemyCarrierAlive = this.carriers.some(cc => cc.alive && cc.team === 1);
+    const friendlyCarrier = this.carriers.find(cc => cc.team === 0);
+
+    if (type === 'deathmatch' || type === 'pvp'){
+      if (this.net){
+        // PvP: win when all team-1 (remote) craft are gone, after they've spawned
+        if (this.netSpawned && enemiesAlive === 0 && this.craft.some(c => c.team === 1)){
+          this.endBattle(true, 'Enemy fleet destroyed');
+        }
+      } else if (enemiesAlive === 0 && this.craft.length > 0){
+        this.endBattle(true, 'All enemies destroyed');
+      }
+    } else if (type === 'survive'){
+      if (this.time >= this.timeLimit){ this.endBattle(true, 'Survived'); }
+      else if (enemiesAlive === 0 && this.cfg.enemies && this.cfg.enemies.length){ this.endBattle(true, 'All enemies destroyed'); }
+    } else if (type === 'sink'){
+      if (!enemyCarrierAlive){ this.endBattle(true, 'Enemy carrier sunk'); }
+    } else if (type === 'escort'){
+      if (friendlyCarrier && !friendlyCarrier.alive){ this.endBattle(false, 'Carrier was lost'); }
+      else if (enemiesAlive === 0){ this.endBattle(true, 'Carrier escorted safely'); }
+    }
+
+    // generic timeout (non-survive)
+    if (this.timeLimit && type !== 'survive' && this.time >= this.timeLimit){
+      this.endBattle(enemiesAlive === 0, 'Time up');
+    }
+  }
+
+  endBattle(win, reason){
+    if (this.over) return;
+    this.over = true;
+    this.result.win = win;
+    this.result.reason = reason;
+    this.result.time = this.time;
+    this.result.score += win ? 500 : 0;
+    this.flashMsg(win ? 'MISSION COMPLETE' : 'MISSION FAILED', win ? 'good' : 'bad', 5);
+    toast((win ? 'VICTORY — ' : 'DEFEAT — ') + reason, win ? 'good' : 'bad');
+    if (document.pointerLockElement) document.exitPointerLock();
+    // give the explosion/message a beat, then tear the battle down and hand back to
+    // the caller. Without Battle.stop() the HUD overlay, input handlers and frame loop
+    // linger on top of the hub — leaving the player stuck until a full refresh.
+    const cb = this.cfg.onEnd;
+    const res = { ...this.result };
+    setTimeout(() => {
+      if (this.net && this.net.close) try { this.net.close(); } catch (e) {}
+      Battle.stop();                              // unbind input, hide HUD, stop frame loop, reset view
+      if (typeof cb === 'function') cb(res);
+    }, 2400);
+  }
+
+  // ---------------------------------------------------------------------
+  //  NETPLAY (human vs human)
+  // ---------------------------------------------------------------------
+  sendFleet(){
+    if (!this.net) return;
+    // my fleet = player + allies, as export codes; team flag tells peer to mirror
+    const fleet = [this.player.design, ...(this.cfg.allies || []).filter(Boolean)].map(d => exportCode(d));
+    this.net.send({ t: 'fleet', fleet, name: this.player.name });
+  }
+
+  onNetMsg(msg){
+    if (!msg) return;
+    if (msg.t === 'fleet' && !this.netSpawned){
+      this.spawnRemoteFleet(msg.fleet || []);
+    } else if (msg.t === 'state'){
+      this.netRemoteState = msg;     // {pos, quat, vel, throttle, t}
+    } else if (msg.t === 'fire'){
+      this.applyRemoteFire(msg);
+    } else if (msg.t === 'bye'){
+      this.endBattle(true, 'Opponent disconnected');
+    }
+  }
+
+  spawnRemoteFleet(codes){
+    if (this.netSpawned) return;
+    this.netSpawned = true;
+    codes.forEach((code, i) => {
+      const d = importCode(code) || stockGet('stock_falcon');
+      if (!d) return;
+      // remote fleet faces us, mirrored to the far side of the map
+      const pos = new THREE.Vector3((i % 2 ? 1 : -1) * (40 + i * 30), 360 + i * 20, 1800 + i * 60);
+      const c = this.makeCraft(d, 1, pos, Math.PI, false);
+      c.name = d.name || ('Enemy ' + (i + 1));
+      if (i === 0){ c.isRemote = true; this.remote = c; }   // the human-controlled lead — NO AI
+      else { c.isAI = true; initAI(c, 0.55); }              // the rest of their fleet flown by light AI
+    });
+    toast('Opponent fleet engaged', 'warn');
+  }
+
+  applyRemoteFire(msg){
+    const c = this.remote; if (!c || !c.alive) return;
+    // spawn the matching projectile from the remote craft toward msg.target/dir
+    const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(c.group.quaternion);
+    const muzzle = this.muzzle(c);
+    if (msg.torpedo){
+      // replicate as a real sea-running torpedo (not an air missile); spawnTorpedo picks its own
+      // surface target on this peer's sim when handed target=null.
+      this.spawnTorpedo(c, muzzle, fwd, { key: msg.w, dmg: msg.dmg, splash: msg.splash, turn: msg.turn,
+        torpSpeed: msg.torpSpeed, runDepth: msg.runDepth, turretRange: msg.turretRange, torpRange: msg.torpRange }, null);
+      return;
+    }
+    if (msg.w === 'gun'){
+      this.spawnBullet(c, muzzle, fwd, { dmg: msg.dmg || 14, speed: msg.speed || 1300, splash: 0, tracer: '#ff9a8a' });
+      sfx('mg', 0.08);
+    } else {
+      // missile at nearest of our craft
+      let tgt = null, bd = Infinity;
+      for (const o of this.craft){ if (o.alive && o.team === 0){ const d = Math.hypot(o.pos.x - c.pos.x, o.pos.y - c.pos.y, o.pos.z - c.pos.z); if (d < bd){ bd = d; tgt = o; } } }
+      this.spawnMissile(c, muzzle, fwd, { dmg: msg.dmg || 380, speed: msg.speed || 600, splash: msg.splash || 24, turn: msg.turn || 3, key: msg.w || 'ir' }, tgt);
+      sfx('missile', 0.12);
+    }
+  }
+
+  netSend(dt){
+    if (!this.net || !this.player) return;
+    this.netAccum += dt;
+    if (this.netAccum < 0.05) return;     // ~20 Hz state stream
+    this.netAccum = 0;
+    const p = this.player;
+    this.net.send({
+      t: 'state',
+      pos: { x: p.pos.x, y: p.pos.y, z: p.pos.z },
+      quat: { x: p.group.quaternion.x, y: p.group.quaternion.y, z: p.group.quaternion.z, w: p.group.quaternion.w },
+      vel: { x: p.vel.x, y: p.vel.y, z: p.vel.z },
+      hp: p.hp / p.maxHp, alive: p.alive, time: this.time,
+    });
+    // flush queued fire events
+    while (this.fireEvents.length){ this.net.send(this.fireEvents.shift()); }
+  }
+
+  netTick(dt){
+    // interpolate the remote human craft toward last received transform
+    const c = this.remote;
+    if (!c || !c.alive) return;
+    const st = this.netRemoteState;
+    if (!st){ return; }
+    const tp = TMP.set(st.pos.x, st.pos.y, st.pos.z);
+    // dead-reckon with received velocity, then smooth toward it
+    if (st.vel){ tp.addScaledVector(TMP2.set(st.vel.x, st.vel.y, st.vel.z), Math.min(0.12, this.time - (st._applied || 0))); }
+    c.pos.lerp(tp, 1 - Math.exp(-10 * dt));
+    if (st.quat){ QTMP.set(st.quat.x, st.quat.y, st.quat.z, st.quat.w); c.group.quaternion.slerp(QTMP, 1 - Math.exp(-10 * dt)); }
+    if (st.vel) c.vel.set(st.vel.x, st.vel.y, st.vel.z);
+    c.group.position.copy(c.pos);
+    if (st.alive === false && c.alive){ this.killCraft(c, 'Shot down', this.player); }
+  }
+
+  // queue a fire event for net (called from player fire path)  — wired via wrap below
+  queueNetFire(w){
+    if (!this.net) return;
+    this.fireEvents.push({ t: 'fire', w: w.type === 'gun' ? 'gun' : (w.key || 'ir'), dmg: w.dmg, speed: w.speed, splash: w.splash, turn: w.turn,
+      torpedo: !!w.torpedo, torpSpeed: w.torpSpeed, runDepth: w.runDepth, turretRange: w.turretRange, torpRange: w.torpRange });
+  }
+
+  // ---------------------------------------------------------------------
+  //  HUD RENDER (2D canvas overlay + DOM bars + radar + prediction)
+  // ---------------------------------------------------------------------
+  flashMsg(text, kind = '', secs = 1.2){
+    if (!this.dom.msg) return;
+    this.dom.msg.textContent = text;
+    this.dom.msg.style.color = kind === 'bad' ? 'var(--bad)' : kind === 'good' ? 'var(--good)' : 'var(--warn)';
+    this.dom.msg.classList.add('show');
+    clearTimeout(this._msgT);
+    this._msgT = setTimeout(() => this.dom.msg.classList.remove('show'), secs * 1000);
+  }
+
+  renderHUD(dt){
+    const ctx = this.hudCtx; if (!ctx) return;
+    const W = this.W, H = this.H;
+    ctx.clearRect(0, 0, W, H);
+    const p = this.player;
+
+    // ---- prediction guide (gun lead pipper / lock reticle) ----
+    if (p && p.alive){
+      const w = p.weapons[p.curWeapon];
+      const shooterPos = p.pos;
+      const ls = this.lockState;
+      if (ls && ls.target){
+        const tgtView = ls.target;      // {position,vel,alive,...,_src}
+        const tgt = { position: tgtView.position, vel: tgtView.vel, aimY: tgtView.aimY || 0, alive: tgtView.alive };
+        if (w && w.type === 'lockmissile'){
+          drawLockReticle({ ctx, camera: this.camera, W, H, target: tgt, progress: ls.progress, flash: this.lock.flash, shooterPos });
+        } else {
+          drawPrediction({ ctx, camera: this.camera, W, H, shooterPos, target: tgt, weapon: w, progress: ls.progress, locked: ls.locked, assist: this.assistOn && w && w.type === 'gun' });
+        }
+        // ---- lock note + target distance banner (missile weapons) ----
+        if (w && (w.type === 'missile' || w.type === 'radar' || w.type === 'lockmissile')){
+          const tp = tgt.position;
+          const rng = Math.round(Math.hypot(tp.x - shooterPos.x, tp.y - shooterPos.y, tp.z - shooterPos.z));
+          const locked = ls.locked, pct = Math.round(ls.progress * 100);
+          const txt = locked ? `◉ MISSILE LOCK  ·  ${rng} m` : `◎ LOCKING ${pct}%  ·  ${rng} m`;
+          const col = locked ? '#ff3b3b' : '#ffce3b';
+          ctx.save();
+          ctx.font = 'bold 17px monospace'; ctx.textAlign = 'center';
+          const bw = ctx.measureText(txt).width + 30, bx = W / 2, by = 64;
+          ctx.globalAlpha = locked ? 0.55 + 0.45 * Math.abs(Math.sin(this.time * 6)) : 0.95;
+          ctx.fillStyle = 'rgba(8,12,18,0.55)'; ctx.fillRect(bx - bw / 2, by - 17, bw, 29);
+          ctx.strokeStyle = col; ctx.lineWidth = 1.6; ctx.strokeRect(bx - bw / 2, by - 17, bw, 29);
+          ctx.fillStyle = col; ctx.fillText(txt, bx, by + 3);
+          ctx.restore();
+        }
+      }
+      // centre crosshair
+      ctx.save();
+      ctx.strokeStyle = 'rgba(57,255,136,.8)'; ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(W / 2 - 12, H / 2); ctx.lineTo(W / 2 - 4, H / 2);
+      ctx.moveTo(W / 2 + 4, H / 2); ctx.lineTo(W / 2 + 12, H / 2);
+      ctx.moveTo(W / 2, H / 2 - 12); ctx.lineTo(W / 2, H / 2 - 4);
+      ctx.moveTo(W / 2, H / 2 + 4); ctx.lineTo(W / 2, H / 2 + 12);
+      ctx.stroke();
+      ctx.beginPath(); ctx.arc(W / 2, H / 2, 2, 0, 7); ctx.stroke();
+      ctx.restore();
+
+      // ---- virtual control-stick + throttle (live input feedback) ----
+      {
+        const cx = W / 2, cy = H - 104, R = 34;
+        ctx.save();
+        ctx.lineWidth = 1.2;
+        ctx.strokeStyle = 'rgba(120,150,180,.30)';
+        ctx.strokeRect(cx - R, cy - R, R * 2, R * 2);
+        ctx.beginPath(); ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy); ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R); ctx.stroke();
+        const sx = cx + clamp(p.ctrlRoll, -1, 1) * R;
+        const sy = cy - clamp(p.ctrlPitch, -1, 1) * R;      // up = nose-up demand
+        ctx.strokeStyle = 'rgba(57,255,136,.5)';
+        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(sx, sy); ctx.stroke();
+        ctx.fillStyle = p.stalled ? 'rgba(255,77,109,.95)' : 'rgba(57,255,136,.95)';
+        ctx.beginPath(); ctx.arc(sx, sy, 4, 0, 7); ctx.fill();
+        // throttle column to the left
+        const tx = cx - R - 14, th = R * 2;
+        ctx.strokeStyle = 'rgba(120,150,180,.30)';
+        ctx.strokeRect(tx - 5, cy - R, 10, th);
+        const tfill = clamp(p.throttle, 0, 1) * th;
+        ctx.fillStyle = p.boost ? 'rgba(255,154,61,.95)' : 'rgba(57,208,255,.85)';
+        ctx.fillRect(tx - 5, cy + R - tfill, 10, tfill);
+        ctx.restore();
+      }
+
+      // off-screen / on-screen enemy markers (small boxes)
+      ctx.save();
+      ctx.lineWidth = 1.2;
+      for (const o of this.craft){
+        if (!o.alive || o.team === p.team) continue;
+        const sc = this.project(o.pos);
+        if (sc && sc.front){
+          ctx.strokeStyle = 'rgba(255,77,109,.7)';
+          ctx.strokeRect(sc.x - 10, sc.y - 10, 20, 20);
+        }
+      }
+      ctx.restore();
+    }
+
+    // ---- DOM bars ----
+    if (p){
+      const hp = clamp(p.hp / p.maxHp, 0, 1);
+      this.dom.hp.style.width = (hp * 100) + '%';
+      this.dom.hpv.textContent = Math.max(0, Math.round(p.hp)) + ' HP' + (p.armor ? ' /' + Math.round(p.armor) + 'A' : '');
+      const fuel = clamp(p.fuel / p.maxFuel, 0, 1);
+      this.dom.fuel.style.width = (fuel * 100) + '%';
+      this.dom.fuelv.textContent = Math.round(fuel * 100) + '%';
+      // boost = fuel headroom-ish; show as available while fuel remains
+      this.dom.boost.style.width = (p.boost ? 100 : (p.fuel > 0 ? 60 : 0)) + '%';
+      this.dom.boostv.textContent = p.boost ? 'ON' : (p.fuel > 0 ? 'RDY' : '—');
+      const heat = clamp((p.temp - AMBIENT_TEMP) / (p.stats.overheat - AMBIENT_TEMP), 0, 1);
+      this.dom.heat.style.width = (heat * 100) + '%';
+      this.dom.heatv.textContent = Math.round(p.temp) + '°C';
+      // weapon + ammo
+      const w = p.weapons[p.curWeapon];
+      if (w){
+        const ammoTxt = w.reloading > 0 ? 'RELOAD…' : (w.ammo + (w.reserve ? '+' + w.reserve : ''));
+        this.dom.weapon.textContent = `▸ ${w.name}  [${ammoTxt}]  (${p.curWeapon + 1}/${p.weapons.length})  ✦${p.flares}`;
+      } else this.dom.weapon.textContent = 'NO WEAPONS';
+      // speed / alt / throttle
+      const kmh = Math.round(p.speed * 3.6);
+      const alt = Math.round(p.pos.y - this.groundY);
+      this.dom.spd.textContent = `SPD ${kmh} km/h`;
+      this.dom.alt.textContent = `ALT ${alt} m`;
+      this.dom.thr.textContent = `THR ${Math.round(p.throttle * 100)}%${p.boost ? ' +AB' : ''}${p.engineOn ? '' : ' ⏻OFF'}${p.airbrakeOn ? ' ✖BRAKE' : ''}`;
+      this.dom.mach.textContent = p.stalled ? 'STALL' : (kmh > 1100 ? 'SUPERSONIC' : '');
+      this.dom.mach.className = 'v-mach' + (p.stalled ? ' hud-warn-tone' : '');
+
+      // warnings
+      if (p.stalled) this.flashMsgLow('STALL — LOWER NOSE / ADD POWER');
+      else if (p.temp > p.stats.overheat * 0.95) this.flashMsgLow('OVERHEAT');
+      else if (p.fuel <= 0) this.flashMsgLow('NO FUEL');
+    }
+
+    // ---- objective sub line ----
+    if (this.dom.objsub){
+      const enemiesAlive = this.craft.filter(c => c.alive && c.team !== 0).length;
+      let sub = '';
+      if (this.objective.type === 'survive'){ sub = `Survive ${Math.max(0, Math.ceil(this.timeLimit - this.time))}s · Bandits ${enemiesAlive}`; }
+      else if (this.objective.type === 'sink'){ const cc = this.carriers.find(c => c.team === 1); sub = cc ? `Carrier HP ${Math.max(0, Math.round(cc.hp))}` : 'Carrier sunk'; }
+      else if (this.objective.type === 'escort'){ const cc = this.carriers.find(c => c.team === 0); sub = cc && cc.alive ? `Carrier HP ${Math.max(0, Math.round(cc.hp))} · Bandits ${enemiesAlive}` : 'Carrier lost'; }
+      else { sub = `Bandits remaining: ${enemiesAlive} · Kills ${this.result.kills}`; }
+      this.dom.objsub.textContent = sub;
+    }
+
+    // ---- radar ----
+    this.renderRadar();
+  }
+
+  flashMsgLow(text){
+    // low-priority warning that only shows if nothing more urgent is up
+    if (this.dom.msg && !this.dom.msg.classList.contains('show')) this.flashMsg(text, 'warn', 0.6);
+  }
+
+  project(v){
+    TMP.copy(v).project(this.camera);
+    if (TMP.z > 1) return { x: 0, y: 0, front: false };
+    return { x: (TMP.x * 0.5 + 0.5) * this.W, y: (-TMP.y * 0.5 + 0.5) * this.H, front: true };
+  }
+
+  renderRadar(){
+    const ctx = this.radarCtx; if (!ctx) return;
+    const S = 180, R = S / 2, scale = R / 3200;
+    ctx.clearRect(0, 0, S, S);
+    const p = this.player; if (!p) return;
+    // rings
+    ctx.strokeStyle = 'rgba(57,208,255,.25)'; ctx.lineWidth = 1;
+    for (let r = 1; r <= 3; r++){ ctx.beginPath(); ctx.arc(R, R, R * r / 3, 0, 7); ctx.stroke(); }
+    ctx.beginPath(); ctx.moveTo(R, 0); ctx.lineTo(R, S); ctx.moveTo(0, R); ctx.lineTo(S, R); ctx.stroke();
+    // Orient the radar to the player's heading (forward = up) by projecting each contact
+    // onto the player's forward/right axes. The previous yaw-rotation matrix was mis-derived
+    // and mapped contacts onto the wrong side — a bandit dead ahead could read as behind you.
+    const f = TMP.set(0, 0, 1).applyQuaternion(p.group.quaternion);
+    const flen = Math.hypot(f.x, f.z) || 1;
+    const ux = f.x / flen, uz = f.z / flen;            // unit forward in world XZ
+    const blip = (o, color, size) => {
+      const dx = o.pos.x - p.pos.x, dz = o.pos.z - p.pos.z;
+      const ahead = dx * ux + dz * uz;                 // forward component → screen up
+      const side  = dx * uz - dz * ux;                 // right component   → screen right
+      const x = R + side * scale, y = R - ahead * scale;
+      if (Math.hypot(x - R, y - R) > R) return;
+      ctx.fillStyle = color;
+      ctx.fillRect(x - size, y - size, size * 2, size * 2);
+    };
+    for (const o of this.craft){
+      if (!o.alive || o === p) continue;
+      blip(o, o.team === p.team ? '#39ff88' : '#ff4d6d', 2);
+    }
+    for (const cc of this.carriers){ if (cc.alive) blip(cc, cc.team === p.team ? '#39d0ff' : '#ff8844', 3.4); }
+    // player at centre
+    ctx.fillStyle = '#fff'; ctx.beginPath();
+    ctx.moveTo(R, R - 5); ctx.lineTo(R - 4, R + 4); ctx.lineTo(R + 4, R + 4); ctx.closePath(); ctx.fill();
+  }
+
+  // ---------------------------------------------------------------------
+  //  TEARDOWN
+  // ---------------------------------------------------------------------
+  teardown(){
+    if (this.unsubFrame) this.unsubFrame();
+    this.unbindInput();
+    clearTimeout(this._msgT);
+    clearTimeout(this._helpT1); clearTimeout(this._helpT2);   // don't leak the controls-legend timers on fast restart
+    // dispose scene contents (but keep the cross-battle shared geometry cache)
+    const shared = new Set([Sim.bulletGeom, Sim.trailGeom, Sim.missileGeom, Sim.missileNoseGeom, Sim.missileFinGeom, Sim.flameGeom, Sim.bombGeom, Sim.bombNoseGeom, Sim.bombFinGeom, Sim.boomGeom, Sim.flareGeom2, Sim.torpedoGeom, Sim.torpedoNoseGeom, Sim.wakeGeom].filter(Boolean));
+    if (this.scene){
+      this.scene.traverse(o => {
+        if (o.geometry && o.geometry.dispose && !shared.has(o.geometry)) o.geometry.dispose();
+        if (o.material){
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          // material.dispose() does NOT free the material's textures — dispose those too,
+          // or every battle leaks them (the sky/HUD/any mapped material).
+          mats.forEach(m => { if (!m) return; for (const k in m){ const v = m[k]; if (v && v.isTexture) v.dispose(); } m.dispose && m.dispose(); });
+        }
+        // a DirectionalLight's 2048² shadow map is a GPU render target the scene drop never
+        // frees — dispose it or every battle leaks a ~16 MB depth texture (the #1 leak).
+        if (o.isLight && o.shadow && o.shadow.map){ o.shadow.map.dispose(); o.shadow.map = null; }
+      });
+    }
+    // dispose the per-battle shared tracer materials (some may have no live bullet mesh
+    // in the scene at teardown, so the traverse above wouldn't have caught them).
+    if (this.bulletMats){ for (const p of this.bulletMats.values()){ p.solid.dispose(); p.trail.dispose(); } this.bulletMats = null; }
+    // per-battle torpedo materials (shared across all torpedoes; may have no live mesh at teardown)
+    if (this.torpedoMat){ this.torpedoMat.dispose(); this.torpedoMat = null; }
+    if (this.wakeMat){ this.wakeMat.dispose(); this.wakeMat = null; }
+    this.bullets.length = 0; this.missiles.length = 0; this.torpedoes.length = 0; this.flares.length = 0; this.fx.length = 0;
+    this.craft.length = 0; this.carriers.length = 0;
+    resetView();
+    if (this.hud){
+      hide(this.hud);
+      Array.from(this.hud.children).forEach(ch => { if (ch.id !== 'hud-canvas') ch.remove(); });
+      if (this.hudCtx) this.hudCtx.clearRect(0, 0, this.hudCanvas.width, this.hudCanvas.height);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  geometry / math helpers
+// ---------------------------------------------------------------------------
+// distance from point P to segment AB (all Vector3-like with x/y/z)
+function distSegPoint(a, b, p){
+  const abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z;
+  const apx = p.x - a.x, apy = p.y - a.y, apz = p.z - a.z;
+  const ab2 = abx * abx + aby * aby + abz * abz || 1;
+  let t = (apx * abx + apy * aby + apz * abz) / ab2;
+  t = clamp(t, 0, 1);
+  const cx = a.x + abx * t, cy = a.y + aby * t, cz = a.z + abz * t;
+  return Math.hypot(p.x - cx, p.y - cy, p.z - cz);
+}
+
+function objectiveLabel(obj){
+  if (!obj) return 'Engage';
+  if (obj.label) return obj.label;
+  switch (obj.type){
+    case 'deathmatch': return 'DESTROY ALL ENEMIES';
+    case 'survive': return 'SURVIVE THE ONSLAUGHT';
+    case 'sink': return 'SINK THE ENEMY CARRIER';
+    case 'escort': return 'ESCORT THE CARRIER';
+    case 'pvp': return 'PVP — DESTROY THE ENEMY FLEET';
+    default: return 'ENGAGE';
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  Hook the player fire paths into the net so fire events propagate. We wrap
+//  fireWeapon so any local player shot is mirrored to the peer.
+// ---------------------------------------------------------------------------
+const _origFire = Sim.prototype.fireWeapon;
+Sim.prototype.fireWeapon = function(c, w, idx){
+  _origFire.call(this, c, w, idx);
+  if (this.net && c === this.player) this.queueNetFire(w);
+};
