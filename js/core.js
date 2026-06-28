@@ -53,7 +53,7 @@ export function importCode(str){
 export const State = {
   money: 18000,                 // campaign credits
   library: [],                  // AircraftDesign[]  (player's saved designs)
-  settings: { sfx: true, invertY: false, masterVol: 0.8 },
+  settings: { sfx: true, music: true, invertY: false, masterVol: 0.8 },
   campaign: {
     started: false,
     onboard: 'intro',           // first-run flow: 'intro'→'tutorial'→'carrier'→'plane'→'done'

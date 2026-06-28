@@ -7,6 +7,7 @@
 import { initEngine } from './engine.js';
 import { load, bus } from './core.js';
 import { Menu } from './menu.js';
+import { Music } from './music.js';
 import { toast } from './util.js';
 
 // surface any uncaught error on-screen — invaluable while integrating modules
@@ -36,6 +37,7 @@ function boot(){
     const splash = document.getElementById('boot');
     if (splash) splash.classList.add('hidden');
     Menu.show();
+    Music.play();                            // menu background music (starts on first user gesture if autoplay is blocked)
     bus.emit('booted');
   } catch (err){
     fatal('Failed to start: ' + (err.message || err), err);

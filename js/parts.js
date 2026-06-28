@@ -77,7 +77,7 @@ export const WEAPONS = {
   antiship:    { key: 'antiship',    name: 'Anti-Ship Missile',type: 'lockmissile',dmg:1400, rof: 0.4, speed: 600,  clip: 2,    reload: 8, spread: 0,     splash: 60, lockTime: 3.0, turn: 1.6 },
   guidedbomb:  { key: 'guidedbomb',  name: 'Guided Bomb',    type: 'bomb',        dmg: 1100,rof: 0.4, speed: 0,    clip: 1,    reload: 6, spread: 0,     splash: 55 },
   napalm:      { key: 'napalm',      name: 'Incendiary Bomb',type: 'bomb',        dmg: 700, rof: 0.5, speed: 0,    clip: 2,    reload: 5, spread: 0,     splash: 110 },
-  torpedo:     { key: 'torpedo',     name: 'Aerial Torpedo', type: 'missile',     dmg: 1600,rof: 0.3, speed: 450,  clip: 1,    reload: 9, spread: 0,     splash: 50, lockTime: 2.0, turn: 1.5, torpedo: true, torpSpeed: 300, runDepth: 0.15, torpRange: 4000 },
+  torpedo:     { key: 'torpedo',     name: 'Aerial Torpedo', type: 'missile',     dmg: 1600,rof: 0.3, speed: 450,  clip: 1,    reload: 9, spread: 0,     splash: 50, lockTime: 2.0, turn: 1.5, torpedo: true, torpSpeed: 3000, runDepth: 0.15, torpRange: 4000 },
   // ---- new arsenal (parts added below; types reuse the sim-handled set) ----
   minigun:     { key: 'minigun',     name: 'Light Minigun',  type: 'gun',         dmg: 13,  rof: 34,  speed: 1250, clip: 2400, reload: 4,  spread: 0.026, splash: 0,  heatPerShot: 70,   tracer: '#fff6c8' },
   flak:        { key: 'flak',        name: 'Flak Cannon',    type: 'gun',         dmg: 80,  rof: 3,   speed: 820,  clip: 150,  reload: 4.5,spread: 0.012, splash: 26, heatPerShot: 300,  tracer: '#ffd58a' },
@@ -90,7 +90,7 @@ export const WEAPONS = {
   battleshipgun:{ key: 'battleshipgun',name: 'Battleship Main Gun', type: 'gun', dmg: 720, rof: 0.45,speed: 1050, clip: 24,   reload: 9,  spread: 0.0025, splash: 95, heatPerShot: 2800, tracer: '#ffe08a' },
   // ---- ship torpedoes: type 'missile' + `torpedo` flag → a slow wake-homing run ALONG the sea
   //      surface vs surface vessels (deck tubes auto-launch; the aircraft 'torpedo' above shares it)
-  shiptorpedo:  { key: 'shiptorpedo',  name: 'Heavy Torpedo',       type: 'missile', dmg: 2600, rof: 0.2, speed: 260, clip: 4,    reload: 16, spread: 0,      splash: 110,lockTime: 0,  turn: 1.2, torpedo: true, torpSpeed: 260, runDepth: 0.2, torpRange: 4000 },
+  shiptorpedo:  { key: 'shiptorpedo',  name: 'Heavy Torpedo',       type: 'missile', dmg: 2600, rof: 0.2, speed: 260, clip: 4,    reload: 16, spread: 0,      splash: 110,lockTime: 0,  turn: 1.2, torpedo: true, torpSpeed: 2600, runDepth: 0.2, torpRange: 4000 },
 };
 
 // ---- PART CATALOGUE --------------------------------------------------------

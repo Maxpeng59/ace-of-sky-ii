@@ -17,6 +17,7 @@ import { statLine } from './physics.js';
 import {
   $, el, clear, show, hide, fmtCr, sfx, toast, clamp,
 } from './util.js';
+import { Music } from './music.js';
 import { Creative } from './creative.js';
 import { Campaign } from './campaign.js';
 import { Pvp } from './pvp.js';
@@ -325,6 +326,10 @@ function buildSettings(){
     'Gunfire, locks, UI clicks and explosions.',
   ));
   panel.appendChild(toggleRow(
+    'Music', () => set.music !== false, (v) => { set.music = v; Music.refresh(); if (v) Music.play(); },
+    'Cinematic menu background music.',
+  ));
+  panel.appendChild(toggleRow(
     'Invert Y axis', () => !!set.invertY, (v) => { set.invertY = v; },
     'Pull mouse down to climb (flight-sim style).',
   ));
@@ -345,6 +350,7 @@ function buildSettings(){
     const v = clamp(Number(slider.value) / 100, 0, 1);
     set.masterVol = v;
     volVal.textContent = Math.round(v * 100) + '%';
+    Music.refresh();                         // live-update the music level with the slider
   });
   slider.addEventListener('change', () => {
     save();

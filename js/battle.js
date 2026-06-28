@@ -41,6 +41,7 @@ import {
   LockSystem, leadPoint, homeMissile, drawPrediction, drawLockReticle,
 } from './prediction.js';
 import { initAI, updateAI, updateBomber, updateCarrierPD, pickTarget, updateSquads } from './ai.js';
+import { Music } from './music.js';
 
 // ---------------------------------------------------------------------------
 //  Environment presets — sky gradient, sun, fog and surface look per env.
@@ -119,6 +120,68 @@ const _turretLead = new THREE.Vector3();
 // ===========================================================================
 //  Build an aircraft mesh Group from a design (parts placed by partCenter)
 // ===========================================================================
+// ---- DRAW-CALL OPTIMISATION ------------------------------------------------
+// A detailed airframe is ~250 sub-meshes; 40 of them is >10k draw calls and the GPU
+// (not the sim) is what lags. After the mesh is built + liveried we MERGE every static
+// part into one geometry per distinct material appearance — turning ~250 draw calls per
+// craft into ~10. WEAPON parts (their nodes are referenced for muzzles/turret traverse)
+// and JETTISON drop-tanks are kept as separate nodes; everything else is baked flat.
+function _bucket(x){ return Math.round((x || 0) * 4) / 4; }     // quantise metal/rough to 0.25 steps so
+function _matKey(m){                                            // near-identical materials merge into one group
+  return (m.color ? m.color.getHexString() : '') + '|' + _bucket(m.metalness) + '|' + _bucket(m.roughness) + '|' +
+    (m.transparent ? 't' + _bucket(m.opacity == null ? 1 : m.opacity) : 'o') + '|' + (m.emissive ? m.emissive.getHexString() : '') + '|' +
+    (Math.round(m.emissiveIntensity || 0)) + '|' + (m.side || 0);
+}
+function mergeStaticMeshes(group){
+  group.updateMatrixWorld(true);
+  const collect = [];
+  for (const child of [...group.children]){
+    const k = child.userData && child.userData.partKey;
+    const def = k ? PARTS[k] : null;
+    // a TURRET traverses its barrels and a JETTISONable drop-tank disappears — both keep their
+    // own meshes. Everything else (incl. fixed manual weapons, whose barrels don't move) is baked.
+    if (def && (def.autoTurret || def.jettison)) continue;
+    child.updateMatrixWorld(true);
+    child.traverse(o => { if (o.isMesh && o.geometry) collect.push(o); });
+    const isWeapon = def && (def.category === 'gun' || def.category === 'missile' || def.category === 'bomb');
+    if (isWeapon) child.clear();   // a fixed weapon: bake its visual but KEEP the empty node (claimNode/muzzle resolve its mount)
+    else group.remove(child);
+  }
+  if (collect.length < 8) { collect.forEach(o => group.add(o)); return; }   // not worth it
+  const groups = new Map();
+  for (const m of collect){
+    const mat = Array.isArray(m.material) ? m.material[0] : m.material;
+    if (!mat) continue;
+    const key = _matKey(mat);
+    let e = groups.get(key); if (!e){ e = { mat, list: [] }; groups.set(key, e); }
+    e.list.push(m);
+  }
+  const inv = new THREE.Matrix4().copy(group.matrixWorld).invert(), mtx = new THREE.Matrix4();
+  for (const { mat, list } of groups.values()){
+    const pos = [], nor = [];
+    for (const m of list){
+      let g = m.geometry;
+      if (!g.getAttribute('normal')) g.computeVertexNormals();
+      const ng = g.index ? g.toNonIndexed() : g.clone();
+      ng.applyMatrix4(mtx.multiplyMatrices(inv, m.matrixWorld));
+      const p = ng.getAttribute('position'), nn = ng.getAttribute('normal');
+      for (let i = 0; i < p.count; i++){ pos.push(p.getX(i), p.getY(i), p.getZ(i)); nor.push(nn.getX(i), nn.getY(i), nn.getZ(i)); }
+      ng.dispose();
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geom.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+    const mesh = new THREE.Mesh(geom, mat.clone());
+    mesh.castShadow = true; mesh.receiveShadow = false;
+    group.add(mesh);
+  }
+  for (const m of collect){                                     // free the originals' GPU buffers
+    if (m.geometry && m.geometry.dispose) m.geometry.dispose();
+    const mats = Array.isArray(m.material) ? m.material : [m.material];
+    mats.forEach(mm => mm && mm.dispose && mm.dispose());
+  }
+}
+
 function buildAircraftMesh(design){
   const group = new THREE.Group();
   const parts = (design && design.parts) || [];
@@ -164,6 +227,7 @@ function buildAircraftMesh(design){
     }
   }
   group.userData.dropTanks = dropTanks;
+  mergeStaticMeshes(group);    // collapse the static airframe to a handful of draw calls
   return group;
 }
 
@@ -204,6 +268,7 @@ export const Battle = {
   start(config){
     if (this._live) this.stop();
     this._live = true;
+    Music.pause();                            // hush the menu music for the fight
     this._S = new Sim(config);
     this._S.boot();
   },
@@ -212,6 +277,7 @@ export const Battle = {
     if (!this._live) return;
     this._live = false;
     if (this._S){ this._S.teardown(); this._S = null; }
+    Music.play();                             // back to a menu/lobby — resume the music
   },
 };
 
@@ -572,9 +638,13 @@ class Sim {
     const claimNode = (key) => { for (const o of group.children){ if (!_usedNodes.has(o) && o.userData && o.userData.partKey === key){ _usedNodes.add(o); return o; } } return null; };
     const weapons = [];
     const turrets = [];
+    const torpedoMounts = [];
     for (const w of allWeapons){
       const node = claimNode(w.partKey);
-      if (w.turret) turrets.push({ w, node, aimYaw: 0, target: null });
+      // a piloted SHIP's deck torpedo tubes AUTO-launch (like its guns do via updateTurrets);
+      // an AIRCRAFT's torpedo stays a manual drop the pilot aims (scaleMul===1).
+      if (w.torpedo && scaleMul > 1) torpedoMounts.push({ w: { ...w, cool: 0 }, node });
+      else if (w.turret) turrets.push({ w, node, aimYaw: 0, target: null });
       else { w.node = node; weapons.push(w); }
     }
 
@@ -602,6 +672,7 @@ class Sim {
       flares: stats.flares || 0,
       weapons,
       turrets,                             // auto-traversing defensive turrets (fire themselves)
+      torpedoMounts,                       // a piloted ship's deck torpedo tubes (auto-launch, see updateTorpedoMounts)
       curWeapon: weapons.length ? 0 : -1,
       throttle: 0.7,
       throttleTarget: 0.7,    // player: Z toggles engine on/off → 1 or 0; W/S fine-trim
@@ -896,6 +967,7 @@ class Sim {
 
     // 5b. auto-turrets traverse + fire on their own (player + AI + carrier deck guns)
     for (const c of this.craft){ if (c.alive && !c.isRemote) this.updateTurrets(c, dt); }
+    for (const c of this.craft){ if (c.alive && !c.isRemote && c.torpedoMounts && c.torpedoMounts.length) this.updateTorpedoMounts(c, dt); }
     for (const cc of this.carriers){ if (cc.alive && cc.turrets && cc.turrets.length) this.updateTurrets(cc, dt); }
     for (const cc of this.carriers){ if (cc.alive && cc.torpedoMounts && cc.torpedoMounts.length) this.updateTorpedoMounts(cc, dt); }
 
@@ -1553,7 +1625,9 @@ class Sim {
       speed: sp, dmg: w.dmg, splash: w.splash || 60, turn: w.turn || 1.0,
       // live long enough to actually cover the run range (+30% slack for homing turns),
       // clamped so a fast torpedo still gets a sensible lifetime.
-      runDepth: w.runDepth || 0.15, range, target: tgt, life: clamp(range / sp * 1.3, 8, 30), arm: 0.4,
+      // arm after a FIXED ~25 m of run (not a fixed time) so a fast torpedo doesn't fly un-armed
+      // straight THROUGH a close target — 0.4 s × 2600 m/s would be a ~1 km dead zone.
+      runDepth: w.runDepth || 0.15, range, target: tgt, life: clamp(range / sp * 1.3, 8, 30), arm: Math.min(0.4, 25 / sp),
     });
     sfx('ui', c.isPlayer ? 0.22 : 0.08);
   }
@@ -1562,24 +1636,15 @@ class Sim {
     for (let i = this.torpedoes.length - 1; i >= 0; i--){
       const t = this.torpedoes[i];
       t.life -= dt; if (t.arm > 0) t.arm -= dt;
-      // re-acquire if the target died or was never set
-      if (!t.target || !t.target.alive) t.target = this.nearestSurfaceEnemy(t.team, t.pos, t.range);
-      // home on the horizontal plane at the turn rate, then run at constant speed
-      let heading = Math.atan2(t.vel.x, t.vel.z);
-      if (t.target && t.target.alive){
-        const dx = t.target.pos.x - t.pos.x, dz = t.target.pos.z - t.pos.z;
-        let dA = Math.atan2(dx, dz) - heading;
-        while (dA > Math.PI) dA -= Math.PI * 2; while (dA < -Math.PI) dA += Math.PI * 2;
-        heading += clamp(dA, -t.turn * dt, t.turn * dt);
-      }
-      t.vel.set(Math.sin(heading) * t.speed, 0, Math.cos(heading) * t.speed);
+      // STRAIGHT-RUNNING torpedo: it holds its launch heading and speed — NO homing / no turn
+      // (a fast unguided fish; the launcher/pilot aims it). Velocity is constant; just integrate.
       const prev = TMP2.copy(t.pos);
       t.pos.x += t.vel.x * dt; t.pos.z += t.vel.z * dt;
       // ride the waterline: settle just below the surface (half-submerged), descending fast if air-dropped
       const runY = this.surfaceHeight(t.pos.x, t.pos.z) - t.runDepth;
       t.pos.y += clamp(runY - t.pos.y, -45 * dt, 18 * dt);
       t.mesh.position.copy(t.pos);
-      t.mesh.rotation.y = heading;
+      t.mesh.rotation.y = Math.atan2(t.vel.x, t.vel.z);
 
       // detonate on a surface vessel (never on the open water — it lives there). Armed after launch.
       let det = false, at = t.pos;
@@ -1729,10 +1794,9 @@ class Sim {
   damage(o, amount, attacker, allowArmor){
     if (!o.alive) return;
     let dmg = amount;
-    if (allowArmor && o.armor){
-      // armor soaks a fraction proportional to armor vs total HP
-      const soak = clamp(o.armor / (o.maxHp || 1), 0, 0.7);
-      dmg *= (1 - soak);
+    if (allowArmor && o.armor > 0){
+      // armored target: a flat 70% of the hit is soaked by the plating (take 30%).
+      dmg *= 0.30;
     }
     // FLEET SCREEN — a major hit on a surface unit steaming with same-type escorts is
     // partly soaked by the formation's massed armour & point-defence (sisters shield it).
@@ -1766,8 +1830,14 @@ class Sim {
     c.alive = false; c.dead = true;
     this.spawnExplosion(c.pos, 1.8);
     sfx('boom', c.isPlayer ? 0.6 : 0.3);
-    // drop the wreck
+    // drop the wreck — and free its GPU buffers. A craft's merged airframe geometry + materials
+    // are built per-craft (never shared), so disposing them on death is safe and stops a steady
+    // VRAM leak in a long fight where dozens of craft are destroyed.
     this.scene.remove(c.group);
+    c.group.traverse(o => {
+      if (o.geometry && o.geometry.dispose) o.geometry.dispose();
+      if (o.material){ const mm = Array.isArray(o.material) ? o.material : [o.material]; mm.forEach(m => m && m.dispose && m.dispose()); }
+    });
     // scoring
     if (attacker === this.player && !c.isPlayer){ this.result.kills++; this.result.score += 100 + Math.round((c.stats.cost || 0) / 100); toast(`${c.name} destroyed`, 'good'); }
     if (c.isPlayer){
@@ -1788,7 +1858,10 @@ class Sim {
       this.spawnExplosion(TMP.copy(cc.pos).add(off), 2.4);
     }
     sfx('boom', 0.7);
-    setTimeout(() => { if (cc.mesh) this.scene.remove(cc.mesh); }, 200);
+    setTimeout(() => { if (cc.mesh){ this.scene.remove(cc.mesh); cc.mesh.traverse(o => {
+      if (o.geometry && o.geometry.dispose) o.geometry.dispose();
+      if (o.material){ const mm = Array.isArray(o.material) ? o.material : [o.material]; mm.forEach(m => m && m.dispose && m.dispose()); }
+    }); } }, 200);
     toast(`${cc.name} sunk!`, cc.team === 1 ? 'good' : 'bad');
     if (attacker === this.player) this.result.score += 800;
   }
