@@ -1378,19 +1378,17 @@ function buildRepairBay(T, d, o = {}){
 function buildMeleeBlade(T, d, o = {}){
   const s = D(d.size); const g = new T.Group();
   const W = s[0], H = s[1], L = s[2];
-  const col = o.color || '#9aa3ac', steel = { metal: 0.82, rough: 0.3 }, edge = { metal: 0.9, rough: 0.2 };
-  const halfW = (W / 3) * 0.5;                 // 1/3 of the width → a narrow blade
-  const len = L * 2;                            // elongated ×2 into a spear
-  const t = H * 0.16;                           // thin facets
-  const tilt = 15 * Math.PI / 180;             // top/bottom facets meet at a central spine
-  const root = box(T, W * 0.42, H * 0.36, L * 0.3, '#3a4046', { metal: 0.6, rough: 0.5 }); root.position.z = -len * 0.16; g.add(root);   // mount block
-  for (const sign of [1, -1]){                  // the two facets, hinged at the spine
-    const piv = new T.Group(); piv.position.y = sign * t * 0.5; piv.rotation.x = -sign * tilt;
-    const fb = box(T, halfW * 2, t, len * 0.86, col, steel); fb.position.z = len * 0.3; piv.add(fb);
-    g.add(piv);
+  const col = o.color || '#9aa3ac', steel = { metal: 0.85, rough: 0.28 }, edge = { metal: 0.95, rough: 0.16 };
+  const len = L * 2;                            // long forward reach
+  const gap = W * 0.38;                          // the two blades sit WELL apart (railgun rails, not fork prongs)
+  // back breech + a cross-yoke that spreads the pair — exactly the railgun's twin-rail layout
+  const breech = box(T, W * 0.46, H * 0.4, L * 0.3, '#2a2f35', { metal: 0.7, rough: 0.4 }); breech.position.z = -len * 0.2; g.add(breech);
+  const yoke = box(T, gap * 2 + W * 0.14, H * 0.14, L * 0.12, '#4a4d52', { metal: 0.82 }); yoke.position.z = -len * 0.04; g.add(yoke);
+  for (const sx of [-1, 1]){ const x = sx * gap;
+    const body = box(T, W * 0.055, H * 0.24, len * 0.66, col, steel); body.position.set(x, 0, len * 0.18); g.add(body);        // thin flat blade
+    const hone = box(T, W * 0.016, H * 0.27, len * 0.66, '#e6ecf0', edge); hone.position.set(x, 0, len * 0.18); g.add(hone);   // bright honed edge
+    const tip = cylZ(T, 0.001, H * 0.135, len * 0.36, col, { ...edge, seg: 14 }); tip.scale.x = 0.34; tip.position.set(x, 0, len * 0.66); g.add(tip);   // honed to a sharp point
   }
-  const spine = box(T, halfW * 0.5, t * 1.6, len * 0.9, '#5a626b', steel); spine.position.z = len * 0.28; g.add(spine);   // central rib
-  const tip = box(T, halfW * 0.7, t * 0.5, len * 0.22, '#dfe6ea', edge); tip.position.z = len * 0.78; g.add(tip);          // bright sharpened point
   return g; }
 function a_flarePod(T, d, o = {}){ const s = D(d.size); const g = new T.Group();
   g.add(box(T, s[0] * 0.5, s[1] * 0.45, s[2] * 0.7, '#3a3d42', { metal: 0.6 }));
