@@ -59,6 +59,7 @@ const DEG = Math.PI / 180;
 const BANK_SIGN = -1;
 const MAX_BANK = 1.15;            // ≈66° — the bank the auto-coordinator holds at full turn demand
 const GROUND_CLEAR = 8;           // belly clearance a craft rests at on the surface (must exceed the +2 crash line)
+const REPAIR_DELAY = 4;           // seconds after a hit before onboard repair bays resume mending
 const SHIP_SCALE = 2;             // the PLAYER's piloted ship (a ship/carrier design flown via makeCraft) renders at
                                   // this scale; its hitbox, water clearance and chase camera track it via scaleMul.
 const CARRIER_SCALE = SHIP_SCALE * 2.5;  // NPC ships/carriers (makeCarrier) render 2.5× the player's vessel — bigger,
@@ -194,10 +195,14 @@ function buildAircraftMesh(design){
     try { obj = def.build(THREE, def); } catch (e){ continue; }
     const c = partCenter(p, def);
     obj.position.set(c.x, c.y, c.z);
-    // Orient EXACTLY as the hangar editor does (addPartMesh): all three quarter-turn axes
-    // — pitch (rx), yaw (rot), roll (rz) — negated, in 'YXZ' order. The old code applied
-    // only +yaw, so any pitch/roll you set in the hangar (and even yaw, mirrored) was lost.
-    obj.rotation.set(-(p.rx || 0) * Math.PI / 2, -(p.rot || 0) * Math.PI / 2, -(p.rz || 0) * Math.PI / 2, 'YXZ');
+    // Orient EXACTLY as the hangar editor does (addPartMesh): each axis is an eighth-turn
+    // (45° step) = quarter field ×2 + 45° half-step flag, negated, in 'YXZ' order. Half-flags
+    // default to 0, so a legacy design's rot×2 eighths = its original 90°-multiple angle.
+    const _E = Math.PI / 4;
+    obj.rotation.set(
+      -((p.rx || 0) * 2 + (p.hp || 0)) * _E,
+      -((p.rot || 0) * 2 + (p.hy || 0)) * _E,
+      -((p.rz || 0) * 2 + (p.hr || 0)) * _E, 'YXZ');
     obj.userData.partKey = p.key;
     if (def.jettison) dropTanks.push(obj);
     obj.traverse(o => { if (o.isMesh){ o.castShadow = true; o.receiveShadow = false; } });
@@ -537,7 +542,7 @@ class Sim {
     let carrierAllies = 0;
     (cfg.allies || []).forEach((d, i) => {
       if (!d) return;
-      if (d.isCarrier || d.role === 'carrier' || d.role === 'ship'){
+      if (d.isCarrier || d.role === 'carrier' || d.role === 'ship' || d.role === 'cruiser'){
         const k = carrierAllies++;
         this.makeCarrier(d, 0, new THREE.Vector3(260 + k * 150, 0, -1500 - k * 220));
         return;
@@ -570,7 +575,7 @@ class Sim {
       (cfg.enemies || []).forEach((entry) => {
         const d = entry.design;
         if (!d) return;
-        if (d.isCarrier || d.role === 'carrier' || d.role === 'ship'){
+        if (d.isCarrier || d.role === 'carrier' || d.role === 'ship' || d.role === 'cruiser'){
           for (let k = 0; k < (entry.count || 1); k++){
             this.makeCarrier(d, 1, new THREE.Vector3(-300 + ecn * 220, 0, 2200 + ecn * 350));
             ecn++;
@@ -618,7 +623,7 @@ class Sim {
     // same size as the wingmen/enemy ships (NPC ships route to makeCarrier; only the PLAYER
     // ever reaches makeCraft with a ship design). scaleMul also scales its hitbox, water
     // clearance and chase-camera distance below.
-    const scaleMul = (design && (design.role === 'ship' || design.role === 'carrier' || design.isCarrier)) ? SHIP_SCALE : 1;
+    const scaleMul = (design && (design.role === 'ship' || design.role === 'cruiser' || design.role === 'carrier' || design.isCarrier)) ? SHIP_SCALE : 1;
     if (scaleMul !== 1) group.scale.setScalar(scaleMul);
     this.scene.add(group);
 
@@ -639,12 +644,17 @@ class Sim {
     const weapons = [];
     const turrets = [];
     const torpedoMounts = [];
+    let melee = null;
     for (const w of allWeapons){
       const node = claimNode(w.partKey);
       // a piloted SHIP's deck torpedo tubes AUTO-launch (like its guns do via updateTurrets);
       // an AIRCRAFT's torpedo stays a manual drop the pilot aims (scaleMul===1).
       if (w.torpedo && scaleMul > 1) torpedoMounts.push({ w: { ...w, cool: 0 }, node });
       else if (w.turret) turrets.push({ w, node, aimYaw: 0, target: null });
+      else if (w.type === 'melee'){            // a ram blade — contact damage, never in the weapon cycle
+        const reach = (w.reach || 24) * scaleMul;
+        if (!melee || w.dmg > melee.dmg) melee = { dmg: w.dmg, reach, gap: w.gap || 0.5, cool: 0 };
+      }
       else { w.node = node; weapons.push(w); }
     }
 
@@ -666,6 +676,8 @@ class Sim {
       hp: stats.durability || 100,
       maxHp: stats.durability || 100,
       armor: stats.armor || 0,
+      repairRate: stats.repair || 0,    // HP/sec restored by onboard repair bays
+      repairCool: 0,                    // seconds of repair lockout after taking a hit
       fuel: stats.fuelMass || 0,
       maxFuel: stats.fuelMass || 1,
       temp: AMBIENT_TEMP,
@@ -673,6 +685,7 @@ class Sim {
       weapons,
       turrets,                             // auto-traversing defensive turrets (fire themselves)
       torpedoMounts,                       // a piloted ship's deck torpedo tubes (auto-launch, see updateTorpedoMounts)
+      melee,                               // ram blade: { dmg, reach, gap, cool } — gores on contact (updateMelee)
       curWeapon: weapons.length ? 0 : -1,
       throttle: 0.7,
       throttleTarget: 0.7,    // player: Z toggles engine on/off → 1 or 0; W/S fine-trim
@@ -698,7 +711,8 @@ class Sim {
 
   makeCarrier(design, team, pos){
     const isSea = this.env.sea;
-    const isShip = !!(design && design.role === 'ship');   // a 'ship' actively hunts surface targets
+    const isCruiser = !!(design && design.role === 'cruiser');  // a lone fast attacker — no formation, charges at flank
+    const isShip = isCruiser || !!(design && design.role === 'ship');   // a ship/cruiser actively hunts targets
     const mesh = buildCarrierMesh(design, isSea);
     mesh.position.copy(pos);
     // carriers sit on the surface
@@ -750,9 +764,10 @@ class Sim {
       alive: true,
       pdRange: 1700, pdSpeed: 1100, pdCool: 0,
       isCarrier: true,
-      isShip, shipSpeed,       // isShip → hunt the nearest enemy surface unit (see updateCarrier)
-      // naval-squadron state (set per-frame by updateFleets): same-type units form up
-      inFleet: false, fleetLeader: null, slotIndex: 0, escortCount: 0, formation: 'wedge', fleetFormed: false,
+      isShip, isCruiser, shipSpeed,   // isShip → hunts targets; isCruiser → solo flank charge, no formation
+      // naval-squadron state (set per-frame by updateFleets): same-type units form up.
+      // A cruiser stays inFleet:false and steams at flank, so it always charges (see updateCarrier).
+      inFleet: false, fleetLeader: null, slotIndex: 0, escortCount: 0, formation: isCruiser ? 'blitz' : 'wedge', fleetFormed: false,
       isAI: true,            // so updateTurrets gives it AI-style infinite reloads
       group: mesh,           // alias so updateTurrets can read .group.quaternion
       turrets, torpedoMounts,
@@ -967,6 +982,7 @@ class Sim {
 
     // 5b. auto-turrets traverse + fire on their own (player + AI + carrier deck guns)
     for (const c of this.craft){ if (c.alive && !c.isRemote) this.updateTurrets(c, dt); }
+    for (const c of this.craft){ if (c.alive && !c.isRemote && c.melee) this.updateMelee(c, dt); }
     for (const c of this.craft){ if (c.alive && !c.isRemote && c.torpedoMounts && c.torpedoMounts.length) this.updateTorpedoMounts(c, dt); }
     for (const cc of this.carriers){ if (cc.alive && cc.turrets && cc.turrets.length) this.updateTurrets(cc, dt); }
     for (const cc of this.carriers){ if (cc.alive && cc.torpedoMounts && cc.torpedoMounts.length) this.updateTorpedoMounts(cc, dt); }
@@ -1174,6 +1190,16 @@ class Sim {
       if (c.isPlayer) this.flashMsg('OVERHEAT', 'bad');
     }
     c.temp = Math.max(AMBIENT_TEMP, c.temp);
+
+    // --- onboard repair --- repair bays mend the airframe over time, but only once the
+    // craft has been clear of damage for REPAIR_DELAY seconds (you can't out-repair fire).
+    if (c.repairRate > 0){
+      if (c.repairCool > 0) c.repairCool -= dt;
+      else if (c.hp < c.maxHp){
+        c.hp = Math.min(c.maxHp, c.hp + c.repairRate * dt);
+        if (c.isPlayer && Math.floor(this.time * 2) % 8 === 0) this.flashMsg('REPAIRING', 'good');
+      }
+    }
 
     // --- ground / sea collision ---
     const surfY = this.surfaceHeight(c.pos.x, c.pos.z);
@@ -1719,17 +1745,22 @@ class Sim {
       const aimW = _TV2.set(tgt.pos.x - base.x, 0, tgt.pos.z - base.z);
       if (aimW.lengthSq() < 1e-6) continue;
       aimW.normalize();
-      // slew the tube toward the bearing (yaw only — the torpedo homes after launch)
+      // slew the tube toward the target bearing — the torpedo runs STRAIGHT from here (no homing),
+      // so it must be properly lined up before it launches.
       if (node){
         const localAim = _TV3.copy(aimW).applyQuaternion(_TQ2.copy(q).invert()).normalize();
         _TQ.setFromUnitVectors(_ZAXIS, localAim);
-        node.quaternion.rotateTowards(_TQ, 1.1 * dt);
+        node.quaternion.rotateTowards(_TQ, 1.6 * dt);
       }
       if (w.cool > 0) continue;
       const barrelW = node
         ? _TV3.set(0, 0, 1).applyQuaternion(_TQ2.multiplyQuaternions(q, node.quaternion)).normalize()
         : aimW;
-      if (barrelW.dot(aimW) < 0.94) continue;   // roughly trained on the target before launch
+      // fire ONLY when the straight shot will actually LAND: the closer the target, the more
+      // angular slop its hull forgives (no homing to correct a sloppy launch).
+      const dist = Math.hypot(tgt.pos.x - base.x, tgt.pos.z - base.z) || 1;
+      const aimTol = clamp((tgt.hitR || 30) * 0.8 / dist, 0.012, 0.22);
+      if (barrelW.dot(aimW) < Math.cos(aimTol)) continue;
       const muzzle = _TV.copy(base).addScaledVector(barrelW, 3 * (cc.group.scale.x || 1));
       this.spawnTorpedo(cc, muzzle, barrelW, w, tgt);
       w.cool = 1 / Math.max(0.05, w.rof);
@@ -1804,6 +1835,7 @@ class Sim {
       dmg *= (1 - Math.min(0.6, 0.2 * o.escortCount));
     }
     o.hp -= dmg;
+    if (o.repairRate) o.repairCool = REPAIR_DELAY;     // taking a hit suspends self-repair
     if (o.isPlayer){ this.shake = Math.min(0.8, this.shake + Math.min(0.4, dmg / 120)); this.flashMsg('HIT', 'bad'); }
     if (o.hp <= 0){
       if (o.isCarrier) this.killCarrier(o, attacker);
@@ -1914,6 +1946,8 @@ class Sim {
     const groups = new Map();
     for (const cc of this.carriers){
       if (!cc.alive) continue;
+      // a CRUISER never forms up — it charges solo at flank speed; keep it out of every squadron.
+      if (cc.isCruiser){ cc.inFleet = false; cc.fleetLeader = null; cc.fleetFormed = false; continue; }
       const key = cc.team + '|' + (cc.design ? (cc.design.name || cc.design.id || 'ship') : 'default');
       let g = groups.get(key);
       if (!g){ g = []; groups.set(key, g); }
@@ -1972,6 +2006,8 @@ class Sim {
     // FORMED UP → drive forward at maximum (flank) speed. While still assembling, the
     // squadron only cruises; once every ship is on station it surges ahead together.
     if (cc.inFleet && cc.fleetFormed) sp *= FLEET_CHARGE_MUL;
+    // A CRUISER skips formation entirely — it ALWAYS steams at flank toward the enemy.
+    if (cc.isCruiser) sp = (cc.shipSpeed || 24) * FLEET_CHARGE_MUL;
 
     if (cc.inFleet && cc.fleetLeader && cc.fleetLeader !== cc && cc.fleetLeader.alive){
       // FOLLOWER: hold a station in the squadron's chosen FORMATION, relative to the leader in
@@ -2081,6 +2117,41 @@ class Sim {
         this.bullets.push({ mesh, trail: null, team: cc.team, owner: cc, pos: mesh.position, vel: dir.multiplyScalar(cc.pdSpeed), dmg: 28, splash: 8, life: 2.5 });
         cc.pdCool = 0.12;
         if (Math.random() < 0.2) sfx('cannon', 0.05);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  //  MELEE — a ram blade gores any enemy the airframe makes contact with.
+  //  No trigger: fly INTO the target. Heavy damage on a short cooldown so a
+  //  sustained ram shreds rather than one-shotting every frame.
+  // ---------------------------------------------------------------------
+  updateMelee(c, dt){
+    const m = c.melee; if (!m) return;
+    if (m.cool > 0){ m.cool -= dt; return; }
+    const reach = m.reach;
+    for (const o of this.craft){
+      if (!o.alive || o.team === c.team || o === c) continue;
+      const r = reach + (o.stats && o.stats.bbox ? Math.max(o.stats.bbox.size.x, o.stats.bbox.size.z) * 0.5 * (o.scaleMul || 1) : 8);
+      if (Math.hypot(c.pos.x - o.pos.x, c.pos.y - o.pos.y, c.pos.z - o.pos.z) <= r){
+        this.damage(o, m.dmg, c, true);
+        this.spawnSpark(o.pos, c.team === 0 ? 0x39ff88 : 0xff8844);
+        this.spawnExplosion(o.pos, 0.7);
+        sfx('hit', o === this.player ? 0.4 : 0.12);
+        if (c.isPlayer) this.flashMsg('RAM!', 'good');
+        m.cool = m.gap;
+        return;
+      }
+    }
+    for (const cc of this.carriers){
+      if (!cc.alive || cc.team === c.team) continue;
+      const r = reach + (cc.hitR || 80);
+      if (Math.hypot(c.pos.x - cc.pos.x, c.pos.y - cc.pos.y, c.pos.z - cc.pos.z) <= r){
+        this.damage(cc, m.dmg, c, false);
+        this.spawnExplosion(c.pos, 1.0);
+        sfx('hit', c.isPlayer ? 0.4 : 0.12);
+        m.cool = m.gap;
+        return;
       }
     }
   }

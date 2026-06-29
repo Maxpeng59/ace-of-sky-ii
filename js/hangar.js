@@ -24,6 +24,11 @@ let S = null;   // the active session object, or null when closed
 
 // quarter-turn helpers ------------------------------------------------------
 const QTURN = Math.PI / 2;
+const EIGHTH = Math.PI / 4;                 // 45° rotation step
+// Combine an axis's quarter-turn field (rot/rx/rz, 0-3, ×90°) with its 45° half-step flag
+// (hy/hp/hr, 0/1) into eighth-turns (0-7). Half-flags default to 0, so a legacy design —
+// where they're absent — yields rot×2 eighths = the same 90°-multiple angle as before.
+const eighths = (q, h) => (((q || 0) * 2 + (h || 0)) % 8);
 
 // Build the world-space position (metres) for a placed part. Mirrors physics.partCenter.
 function placePos(p){
@@ -70,7 +75,8 @@ export const Hangar = {
       design,
       // selection / tooling
       pendingKey: null,        // a palette part chosen for placement
-      pendingRot: 0,           // rotation of the pending ghost
+      pendingRot: 0, pendingRx: 0, pendingRz: 0,   // pending ghost orientation (quarter-turns)
+      pendingHy: 0, pendingHp: 0, pendingHr: 0,    // …+ 45° half-step per axis (yaw / pitch / roll)
       selected: null,          // index into design.parts of a placed part
       // 3d
       scene: null, camera: null, root3d: null, gridMesh: null,
@@ -411,7 +417,7 @@ function buildInfo(info){
 
   const roleLbl = el('label', 'field', 'Role');
   const roleSel = el('select');
-  for (const r of ['fighter', 'interceptor', 'strike', 'bomber', 'heavy', 'drone', 'carrier', 'ship']){
+  for (const r of ['fighter', 'interceptor', 'strike', 'bomber', 'heavy', 'drone', 'carrier', 'ship', 'cruiser']){
     const o = el('option', '', r); o.value = r; if (S.design.role === r) o.selected = true; roleSel.appendChild(o);
   }
   roleSel.onchange = () => { S.design.role = roleSel.value; emitChange(); };
@@ -680,14 +686,15 @@ function updateGhost(){
     gz = Math.round(hitPoint.z - es[2] / 2);
   }
 
-  const cand = { key: S.pendingKey, gx, gy, gz, rot: S.pendingRot || 0, rx: S.pendingRx || 0, rz: S.pendingRz || 0 };
+  const cand = { key: S.pendingKey, gx, gy, gz, rot: S.pendingRot || 0, rx: S.pendingRx || 0, rz: S.pendingRz || 0,
+                 hy: S.pendingHy || 0, hp: S.pendingHp || 0, hr: S.pendingHr || 0 };
   const valid = !collides(cand, -1);
   S.ghostCell = cand;
   S.ghostValid = valid;
 
   const pos = placePos(cand);
   S.ghost.position.copy(pos);
-  S.ghost.rotation.set(-(S.pendingRx || 0) * QTURN, -(S.pendingRot || 0) * QTURN, -(S.pendingRz || 0) * QTURN, 'YXZ');
+  S.ghost.rotation.set(-eighths(cand.rx, cand.hp) * EIGHTH, -eighths(cand.rot, cand.hy) * EIGHTH, -eighths(cand.rz, cand.hr) * EIGHTH, 'YXZ');
   S.ghost.visible = true;
   tintGhost(S.ghost, valid);
 
@@ -697,7 +704,7 @@ function updateGhost(){
     const m = mirrorPart(cand);
     if (m && !(m.gx === cand.gx && m.rot === (cand.rot || 0) && m.rz === (cand.rz || 0))){
       S.ghostMirror.position.copy(placePos(m));
-      S.ghostMirror.rotation.set(-(m.rx || 0) * QTURN, -(m.rot || 0) * QTURN, -(m.rz || 0) * QTURN, 'YXZ');
+      S.ghostMirror.rotation.set(-eighths(m.rx, m.hp) * EIGHTH, -eighths(m.rot, m.hy) * EIGHTH, -eighths(m.rz, m.hr) * EIGHTH, 'YXZ');
       S.ghostMirror.visible = true;
       tintGhost(S.ghostMirror, valid && !collides(m, -1));
     }
@@ -732,6 +739,7 @@ function collides(cand, skip){
 function selectPalette(key){
   S.pendingKey = key;
   S.pendingRot = 0; S.pendingRx = 0; S.pendingRz = 0;
+  S.pendingHy = 0; S.pendingHp = 0; S.pendingHr = 0;
   S.selected = null;
   // keep the current build height ([ / ] adjust it) so layered building persists
   // across part selections instead of snapping back to the floor each time.
@@ -780,15 +788,18 @@ function mirrorPart(p){
   const def = PARTS[p.key]; if (!def) return null;
   const es = effSize(def, p.rot || 0);
   const gx = Math.round(2 * symPlaneX() - p.gx - es[0]);
+  const my = (8 - eighths(p.rot, p.hy)) % 8;   // mirror yaw across the symmetry plane
+  const mr = (8 - eighths(p.rz, p.hr)) % 8;     // …and roll
   return { key: p.key, gx, gy: p.gy, gz: p.gz,
-    rot: (4 - (p.rot || 0)) & 3, rx: p.rx || 0, rz: (4 - (p.rz || 0)) & 3 };
+    rot: my >> 1, hy: my & 1, rx: p.rx || 0, hp: p.hp || 0, rz: mr >> 1, hr: mr & 1 };
 }
 
 function placeGhost(){
   if (!S.pendingKey || !S.ghostCell) return;
   if (!S.ghostValid){ toast('Cells occupied', 'bad'); sfx('hit', 0.2); return; }
   pushUndo();
-  const p = { key: S.ghostCell.key, gx: S.ghostCell.gx, gy: S.ghostCell.gy, gz: S.ghostCell.gz, rot: S.ghostCell.rot, rx: S.ghostCell.rx || 0, rz: S.ghostCell.rz || 0 };
+  const sc = S.ghostCell;
+  const p = { key: sc.key, gx: sc.gx, gy: sc.gy, gz: sc.gz, rot: sc.rot, rx: sc.rx || 0, rz: sc.rz || 0, hy: sc.hy || 0, hp: sc.hp || 0, hr: sc.hr || 0 };
   S.design.parts.push(p);
   addPartMesh(p, S.design.parts.length - 1);
   if (S.mirror){
@@ -840,19 +851,25 @@ function deleteSelected(){
 // rotate the pending ghost OR the selected placed part 90° about an axis
 // ('y' yaw / 'x' pitch / 'z' roll) — full 24-orientation freedom.
 function rotateActive(axis = 'y'){
-  const fld = axis === 'x' ? 'Rx' : axis === 'z' ? 'Rz' : 'Rot';   // pending field suffix
-  const pfld = axis === 'x' ? 'rx' : axis === 'z' ? 'rz' : 'rot';  // part field
+  // Each press steps the chosen axis by 45° (an eighth-turn): combine the quarter field
+  // and the 45° half-step flag, advance by one, split back. q = eighth >> 1 (0-3), h = eighth & 1.
+  const A = axis === 'x' ? { q: 'rx',  h: 'hp', pq: 'pendingRx',  ph: 'pendingHp' }
+          : axis === 'z' ? { q: 'rz',  h: 'hr', pq: 'pendingRz',  ph: 'pendingHr' }
+          :                { q: 'rot', h: 'hy', pq: 'pendingRot', ph: 'pendingHy' };
   if (S.pendingKey){
-    S['pending' + fld] = (((S['pending' + fld] || 0) + 1) & 3);
+    const e = (eighths(S[A.pq], S[A.ph]) + 1) % 8;
+    S[A.pq] = e >> 1; S[A.ph] = e & 1;
     rebuildGhost();
     renderSelInspector();
     return;
   }
   if (S.selected != null){
     const p = S.design.parts[S.selected];
-    if (!S.freePlace && axis === 'y' && collides({ ...p, rot: ((p.rot || 0) + 1) & 3 }, S.selected)){ toast('Rotation would overlap', 'bad'); return; }
+    const ne = (eighths(p[A.q], p[A.h]) + 1) % 8;
+    // only YAW changes the grid footprint (and only across 90° boundaries) — block an overlap
+    if (!S.freePlace && axis === 'y' && collides({ ...p, rot: ne >> 1 }, S.selected)){ toast('Rotation would overlap', 'bad'); return; }
     pushUndo();
-    p[pfld] = (((p[pfld] || 0) + 1) & 3);
+    p[A.q] = ne >> 1; p[A.h] = ne & 1;
     rebuildAircraft();
     S.selected = S.design.parts.indexOf(p);
     highlightSelected();
@@ -881,7 +898,7 @@ function addPartMesh(p, idx){
   const g = new THREE.Group();
   g.add(mesh);
   g.position.copy(placePos(p));
-  g.rotation.set(-(p.rx || 0) * QTURN, -(p.rot || 0) * QTURN, -(p.rz || 0) * QTURN, 'YXZ');
+  g.rotation.set(-eighths(p.rx, p.hp) * EIGHTH, -eighths(p.rot, p.hy) * EIGHTH, -eighths(p.rz, p.hr) * EIGHTH, 'YXZ');
   g.userData.partIndex = idx;
   // record base emissive so selection highlight can restore it; enable shadows
   mesh.traverse(o => {
@@ -1064,8 +1081,9 @@ function renderSelInspector(){
   const desc = el('div', 'faint small'); desc.style.lineHeight = '1.4'; desc.textContent = def.desc || '';
   box.appendChild(desc);
   const meta = el('div', 'mono small'); meta.style.cssText = 'margin-top:6px;color:var(--ink-dim);';
-  const rot = S.selected != null ? (S.design.parts[S.selected].rot || 0) : (S.pendingRot || 0);
-  meta.textContent = metaLine(def) + ' · rot ' + (rot * 90) + '°';
+  const sel = S.selected != null ? S.design.parts[S.selected] : null;
+  const yawDeg = (sel ? eighths(sel.rot, sel.hy) : eighths(S.pendingRot, S.pendingHy)) * 45;
+  meta.textContent = metaLine(def) + ' · yaw ' + yawDeg + '°';
   box.appendChild(meta);
 }
 

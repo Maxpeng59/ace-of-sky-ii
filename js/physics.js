@@ -37,7 +37,7 @@ export function computeStats(design){
   let ctrlPitch = 0, ctrlRoll = 0, ctrlYaw = 0;
   let structureHP = 0, armorHP = 0;
   let heatCap = 0, heatGenMax = 0, heatDiss = 0;
-  let crew = 0, hardpoints = 0, flares = 0, sensor = 0;
+  let crew = 0, hardpoints = 0, flares = 0, sensor = 0, repair = 0;
   const weapons = [];
   let comAcc = { x: 0, y: 0, z: 0 }, massAcc = 0;
   const min = { x: 1e9, y: 1e9, z: 1e9 }, max = { x: -1e9, y: -1e9, z: -1e9 };
@@ -77,6 +77,7 @@ export function computeStats(design){
     crew      += def.crew || 0;
     flares    += def.flares || 0;
     sensor     = Math.max(sensor, def.sensor || 0);
+    repair    += def.repair || 0;                 // HP/sec of in-flight self-repair (repair bays)
     if (def.weapon){
       const w = WEAPONS[def.weapon];
       if (w){ weapons.push({ ...w, ammo: def.ammo || w.clip, mount: c, partKey: p.key, turret: !!def.autoTurret, turretRange: def.turretRange || 0 }); hardpoints++; }
@@ -156,7 +157,7 @@ export function computeStats(design){
     heatCap: Math.max(1, heatCap), heatGenMax, heatDiss: heatDiss + frontal * 50, overheat: OVERHEAT_TEMP,
     agility: { pitch: agilityPitch, roll: agilityRoll, yaw: agilityYaw },
     control: { pitch: ctrlPitch, roll: ctrlRoll, yaw: ctrlYaw },
-    weapons, hardpoints, flares, sensor, crew,
+    weapons, hardpoints, flares, sensor, crew, repair,
     com, col, stability,
     bbox: { min, max, size: { x: bx, y: by, z: bz } },
   };

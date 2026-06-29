@@ -79,6 +79,9 @@ export const WEAPONS = {
   napalm:      { key: 'napalm',      name: 'Incendiary Bomb',type: 'bomb',        dmg: 700, rof: 0.5, speed: 0,    clip: 2,    reload: 5, spread: 0,     splash: 110 },
   torpedo:     { key: 'torpedo',     name: 'Aerial Torpedo', type: 'missile',     dmg: 1600,rof: 0.3, speed: 450,  clip: 1,    reload: 9, spread: 0,     splash: 50, lockTime: 2.0, turn: 1.5, torpedo: true, torpSpeed: 3000, runDepth: 0.15, torpRange: 4000 },
   // ---- new arsenal (parts added below; types reuse the sim-handled set) ----
+  // MELEE: a fixed ram blade — no trigger; it gores any enemy the airframe makes contact with
+  // (battle.js updateMelee). reach/gap are melee-only fields read there.
+  rambladew:   { key: 'rambladew',   name: 'Ram Blade',      type: 'melee',       dmg: 850, reach: 26, gap: 0.5 },
   minigun:     { key: 'minigun',     name: 'Light Minigun',  type: 'gun',         dmg: 13,  rof: 34,  speed: 1250, clip: 2400, reload: 4,  spread: 0.026, splash: 0,  heatPerShot: 70,   tracer: '#fff6c8' },
   flak:        { key: 'flak',        name: 'Flak Cannon',    type: 'gun',         dmg: 80,  rof: 3,   speed: 820,  clip: 150,  reload: 4.5,spread: 0.012, splash: 26, heatPerShot: 300,  tracer: '#ffd58a' },
   railgun:     { key: 'railgun',     name: 'Railgun',        type: 'gun',         dmg: 300, rof: 1,   speed: 2800, clip: 40,   reload: 6,  spread: 0.0015,splash: 5,  heatPerShot: 1300, tracer: '#bfe6ff' },
@@ -1264,17 +1267,41 @@ function a_bombRack(T, d, o = {}){ return buildBomb(T, d, o.r || 0.22, o.count |
 function a_rocketPod(T, d, o = {}){ return buildRocketPod(T, d, o); }
 // Phalanx-style CIWS: a pedestal, the iconic white search radome and a 6-barrel rotary
 // cannon clustered on the +Z firing axis (updateTurrets aims +Z at the target).
+// Phalanx CIWS — the iconic "R2-D2": a deck pedestal + traversing mount carrying the white
+// search/track radome up top and a 6-barrel 20mm rotary gun slung off the front in a shroud.
 function buildCIWS(T, d, o = {}){
   const s = D(d.size), g = new T.Group();
   const W = s[0], H = s[1], L = s[2];
-  const ped = cyl(T, W * 0.28, W * 0.36, H * 0.42, '#3c434a', { metal: 0.7, rough: 0.45 }); ped.position.y = -H * 0.2; g.add(ped);   // pedestal
-  const dome = new T.Mesh(new T.SphereGeometry(W * 0.34, 18, 14, 0, Math.PI * 2, 0, Math.PI * 0.62), mat(T, o.color || '#e9ece6', { metal: 0.18, rough: 0.6 }));
-  dome.position.set(0, H * 0.12, -L * 0.12); g.add(dome);                                                                          // white search radome
-  const hous = box(T, W * 0.34, H * 0.26, L * 0.3, '#444b52', { metal: 0.6 }); hous.position.set(0, H * 0.02, L * 0.14); g.add(hous);  // gun housing
-  for (let i = 0; i < 6; i++){ const a = i / 6 * Math.PI * 2;                                                                       // 6 rotary barrels
-    const bar = cylZ(T, W * 0.028, W * 0.028, L * 0.5, '#1c1f22', { metal: 0.9, rough: 0.3 });
-    bar.position.set(Math.cos(a) * W * 0.09, H * 0.02 + Math.sin(a) * W * 0.09, L * 0.42); g.add(bar); }
-  const hub = cylZ(T, W * 0.05, W * 0.05, L * 0.36, '#2a2e33', { metal: 0.8 }); hub.position.set(0, H * 0.02, L * 0.4); g.add(hub);
+  const steel = { metal: 0.72, rough: 0.42 };
+
+  // deck foot + pedestal (the gun trains about this)
+  const foot = cyl(T, W * 0.4, W * 0.44, H * 0.12, '#2f353b', { metal: 0.78, rough: 0.46 }); foot.position.y = -H * 0.38; g.add(foot);
+  for (let i = 0; i < 6; i++){ const a = i / 6 * Math.PI * 2;                                  // hold-down bolts on the foot ring
+    const bolt = cyl(T, W * 0.025, W * 0.025, H * 0.05, '#15181b', { metal: 0.6 }); bolt.position.set(Math.cos(a) * W * 0.37, -H * 0.33, Math.sin(a) * W * 0.37); g.add(bolt); }
+  const ped = cyl(T, W * 0.24, W * 0.32, H * 0.32, '#3c434a', steel); ped.position.y = -H * 0.18; g.add(ped);
+
+  // rotating mount body + collar
+  const body = cyl(T, W * 0.33, W * 0.33, H * 0.32, '#4a525b', steel); body.position.y = H * 0.04; g.add(body);
+  const collar = cyl(T, W * 0.35, W * 0.35, H * 0.06, '#2f353b', { metal: 0.7 }); collar.position.y = H * 0.2; g.add(collar);
+
+  // the white search/track radome, tilted slightly back, with a dark radar band
+  const dome = new T.Mesh(new T.SphereGeometry(W * 0.36, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.58),
+    mat(T, o.color || '#eef1ec', { metal: 0.14, rough: 0.62 }));
+  dome.position.set(0, H * 0.24, -L * 0.05); dome.rotation.x = -0.16; g.add(dome);
+  const band = cyl(T, W * 0.3, W * 0.32, H * 0.05, '#23282d', { metal: 0.45, open: true }); band.position.set(0, H * 0.14, -L * 0.05); band.rotation.x = -0.16; g.add(band);
+  const finial = cyl(T, W * 0.03, W * 0.03, H * 0.1, '#9aa3ab', { metal: 0.6 }); finial.position.set(0, H * 0.42, -L * 0.07); g.add(finial);
+
+  // gun cradle slung off the front, the rotary breech, and a barrel shroud (+Z)
+  const cradle = box(T, W * 0.3, H * 0.26, L * 0.24, '#3e454c', steel); cradle.position.set(0, -H * 0.06, L * 0.16); g.add(cradle);
+  const trun = cylZ(T, W * 0.05, W * 0.05, L * 0.34, '#23282d', { metal: 0.7 }); trun.rotation.z = Math.PI / 2; trun.position.set(0, -H * 0.06, L * 0.16); g.add(trun);  // trunnion pin
+  const breech = cylZ(T, W * 0.14, W * 0.14, L * 0.16, '#2a2e33', { metal: 0.8 }); breech.position.set(0, -H * 0.06, L * 0.3); g.add(breech);
+  const shroud = cylZ(T, W * 0.1, W * 0.12, L * 0.32, '#5a626b', steel); shroud.position.set(0, -H * 0.06, L * 0.46); g.add(shroud);
+
+  // 6 protruding rotary barrels + a muzzle clamp ring binding their tips
+  for (let i = 0; i < 6; i++){ const a = i / 6 * Math.PI * 2;
+    const bar = cylZ(T, W * 0.022, W * 0.022, L * 0.36, '#1c1f22', { metal: 0.9, rough: 0.3 });
+    bar.position.set(Math.cos(a) * W * 0.06, -H * 0.06 + Math.sin(a) * W * 0.06, L * 0.62); g.add(bar); }
+  const clampR = ringZ(T, W * 0.075, W * 0.014, '#15181b', { metal: 0.85 }); clampR.position.set(0, -H * 0.06, L * 0.74); g.add(clampR);
   return g; }
 
 // Heavy naval gun turret: an armoured barbette + faceted house with 1–3 long barrels on
@@ -1331,6 +1358,40 @@ function a_turret(T, d, o = {}){ const s = D(d.size); const g = new T.Group();
     const bar = cylZ(T, 0.045, 0.045, s[2] * 0.62, '#26282b', { metal: 0.9, rough: 0.26 }); bar.position.set(ox * s[0], s[1] * 0.1, s[2] * 0.34); g.add(bar);
     const mz = cylZ(T, 0.05, 0.05, s[2] * 0.04, '#0a0a0b'); mz.position.set(ox * s[0], s[1] * 0.1, s[2] * 0.64); g.add(mz); }
   return g; }
+// Repair bay: an armoured service module with louvered cooling vents and a lit green service
+// cross on top — onboard damage-control that knits a battered airframe back together.
+function buildRepairBay(T, d, o = {}){
+  const s = D(d.size); const g = new T.Group();
+  const W = s[0], H = s[1], L = s[2];
+  const body = box(T, W * 0.7, H * 0.62, L * 0.82, o.color || '#e3e9ec', { metal: 0.42, rough: 0.55 }); g.add(body);
+  const band = box(T, W * 0.74, H * 0.16, L * 0.86, '#9aa3ab', { metal: 0.6, rough: 0.45 }); g.add(band);   // waist band
+  for (const sx of [-1, 1]) for (let i = -1; i <= 1; i++){                                                   // louvered cooling vents
+    const v = box(T, W * 0.03, H * 0.42, L * 0.14, '#2f353b', { metal: 0.65, rough: 0.4 });
+    v.position.set(sx * W * 0.37, 0, i * L * 0.24); g.add(v); }
+  const cmat = mat(T, '#39ff88', { emissive: 0x2bff85, ei: 0.85, rough: 0.5 });                              // lit service cross
+  const cv = new T.Mesh(new T.BoxGeometry(W * 0.12, H * 0.06, L * 0.36), cmat); cv.position.y = H * 0.33; g.add(cv);
+  const ch = new T.Mesh(new T.BoxGeometry(W * 0.34, H * 0.06, L * 0.12), cmat); ch.position.y = H * 0.33; g.add(ch);
+  return g; }
+// Ram blade — the belly plate's twin-facet fold, but kept as just the top + bottom facets,
+// narrowed to ~1/3 width and stretched ~2× into a long forward spear that tapers to a sharp
+// edge at the nose. A melee weapon: fly it INTO the enemy (battle.js updateMelee).
+function buildMeleeBlade(T, d, o = {}){
+  const s = D(d.size); const g = new T.Group();
+  const W = s[0], H = s[1], L = s[2];
+  const col = o.color || '#9aa3ac', steel = { metal: 0.82, rough: 0.3 }, edge = { metal: 0.9, rough: 0.2 };
+  const halfW = (W / 3) * 0.5;                 // 1/3 of the width → a narrow blade
+  const len = L * 2;                            // elongated ×2 into a spear
+  const t = H * 0.16;                           // thin facets
+  const tilt = 15 * Math.PI / 180;             // top/bottom facets meet at a central spine
+  const root = box(T, W * 0.42, H * 0.36, L * 0.3, '#3a4046', { metal: 0.6, rough: 0.5 }); root.position.z = -len * 0.16; g.add(root);   // mount block
+  for (const sign of [1, -1]){                  // the two facets, hinged at the spine
+    const piv = new T.Group(); piv.position.y = sign * t * 0.5; piv.rotation.x = -sign * tilt;
+    const fb = box(T, halfW * 2, t, len * 0.86, col, steel); fb.position.z = len * 0.3; piv.add(fb);
+    g.add(piv);
+  }
+  const spine = box(T, halfW * 0.5, t * 1.6, len * 0.9, '#5a626b', steel); spine.position.z = len * 0.28; g.add(spine);   // central rib
+  const tip = box(T, halfW * 0.7, t * 0.5, len * 0.22, '#dfe6ea', edge); tip.position.z = len * 0.78; g.add(tip);          // bright sharpened point
+  return g; }
 function a_flarePod(T, d, o = {}){ const s = D(d.size); const g = new T.Group();
   g.add(box(T, s[0] * 0.5, s[1] * 0.45, s[2] * 0.7, '#3a3d42', { metal: 0.6 }));
   for (let i = 0; i < 4; i++){ const tube = cylZ(T, s[1] * 0.07, s[1] * 0.07, s[2] * 0.5, '#dada4d', { metal: 0.5 }); tube.position.set((i % 2 - 0.5) * s[0] * 0.24, (i < 2 ? 1 : -1) * s[1] * 0.12, s[2] * 0.12); g.add(tube); } return g; }
@@ -1355,6 +1416,7 @@ const ARCHETYPES = {
   gun: a_gun, gatling: a_gatling, missilePod: a_missilePod, bombRack: a_bombRack, rocketPod: a_rocketPod,
   turret: a_turret, flarePod: a_flarePod, sensorDish: a_sensorDish,
   ciws: buildCIWS, navalTurret: buildNavalTurret, torpedoTube: buildTorpedoTube,
+  repairBay: buildRepairBay, meleeBlade: buildMeleeBlade,
 };
 
 // ============================================================================
