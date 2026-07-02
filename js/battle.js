@@ -85,6 +85,16 @@ const SHIP_FLOOR_BIG = 0.70;       // …and a larger (slow, crescent-class) shi
 const FLEET_FORM_TOL = 150;        // a follower this close to its slot counts as "on station"
 const FLEET_CHARGE_MUL = 2.0;      // once the squadron is FORMED UP, it surges forward at flank (≈2× cruise)
 const SHIP_MAJOR_HIT = 250;       // damage at/above this is a "major attack" a fleet can soak
+// Solid vessel hit-boxes (see updateShipCollisions). Opposing hulls are solid bodies — they
+// can't interpenetrate; on contact they push apart. NO damage (combat is via weapons). Only
+// ENEMY vessels collide, so same-type squadron formations stay tightly packed.
+const SHIP_COLLIDE_FRAC = 0.92;   // separate enemy hulls whose hit-spheres overlap past this fraction of (rA+rB)
+// Hull steering — a ship can't pivot on a dime. It slews its heading toward the desired course at a
+// capped angular rate and MOVES along its hull, so it arcs into turns like a real vessel instead of
+// snapping to face its velocity each frame. Big hulls turn slower; a nimble cruiser turns fastest.
+const SHIP_TURN_RATE = 0.42;      // rad/s baseline (~24°/s → ~7.5 s to reverse) for a mid-size hull
+const SHIP_TURN_CRUISER = 0.75;   // rad/s for a cruiser — quicker on the helm so it can line up a charge (~43°/s)
+const SHIP_TURN_REF_R = 90;       // hull radius the baseline rate is tuned for; larger hulls scale the rate down
 const TMP = new THREE.Vector3(), TMP2 = new THREE.Vector3(), TMP3 = new THREE.Vector3();
 const _R = new THREE.Vector3(), _ACC = new THREE.Vector3();
 const QTMP = new THREE.Quaternion();
@@ -183,6 +193,53 @@ function mergeStaticMeshes(group){
   }
 }
 
+// Collapse ONE auto-turret node's sub-meshes (ring/dome/barrels/muzzle — 6-24 of them) into a
+// handful of per-material meshes, IN THE NODE'S OWN LOCAL FRAME, re-added under the still-
+// traversable node. mergeStaticMeshes keeps turret nodes whole so they can aim; this bakes
+// their *internal* rigid geometry so a warship's many guns stop submitting hundreds of tiny
+// draw calls. Never touches node.position/quaternion/userData.partKey, so updateTurrets'
+// aim + muzzle math (which read only those) are byte-identical. Call AFTER claimNode.
+function mergeTurretNode(node){
+  if (!node) return;
+  node.updateMatrixWorld(true);
+  const collect = [];
+  node.traverse(o => { if (o.isMesh && o.geometry) collect.push(o); });
+  if (collect.length < 4) return;                              // trivial/empty node — not worth it
+  const nodeInv = new THREE.Matrix4().copy(node.matrixWorld).invert(), mtx = new THREE.Matrix4();
+  const groups = new Map();
+  for (const m of collect){
+    const mat = Array.isArray(m.material) ? m.material[0] : m.material;
+    if (!mat) continue;
+    const key = _matKey(mat);
+    let e = groups.get(key); if (!e){ e = { mat, list: [] }; groups.set(key, e); }
+    e.list.push(m);
+  }
+  for (const c of [...node.children]) node.remove(c);
+  for (const { mat, list } of groups.values()){
+    const pos = [], nor = [];
+    for (const m of list){
+      const g = m.geometry;
+      if (!g.getAttribute('normal')) g.computeVertexNormals();
+      const ng = g.index ? g.toNonIndexed() : g.clone();
+      ng.applyMatrix4(mtx.multiplyMatrices(nodeInv, m.matrixWorld));     // into the node's local frame
+      const p = ng.getAttribute('position'), nn = ng.getAttribute('normal');
+      for (let i = 0; i < p.count; i++){ pos.push(p.getX(i), p.getY(i), p.getZ(i)); nor.push(nn.getX(i), nn.getY(i), nn.getZ(i)); }
+      ng.dispose();
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geom.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+    const mesh = new THREE.Mesh(geom, mat.clone());
+    mesh.castShadow = false; mesh.receiveShadow = false;       // turrets don't cast shadows (see buildAircraftMesh)
+    node.add(mesh);
+  }
+  for (const m of collect){                                    // free the originals' GPU buffers
+    if (m.geometry && m.geometry.dispose) m.geometry.dispose();
+    const mats = Array.isArray(m.material) ? m.material : [m.material];
+    mats.forEach(mm => mm && mm.dispose && mm.dispose());
+  }
+}
+
 function buildAircraftMesh(design){
   const group = new THREE.Group();
   const parts = (design && design.parts) || [];
@@ -212,6 +269,7 @@ function buildAircraftMesh(design){
   // re-centre the group on its part centroid so it rotates about its middle
   const off = n ? { x: cx / n, y: cy / n, z: cz / n } : { x: 0, y: 0, z: 0 };
   for (const ch of group.children) ch.position.sub(new THREE.Vector3(off.x, off.y, off.z));
+  group.userData.centroidOff = off;   // hitbox builders subtract this to place the hull box exactly on the mesh
   // Livery — recolour the airframe to the design colour. MUST match the hangar editor's
   // applyLivery() so what you paint is what you fly: livery everything EXCEPT functional
   // parts (engines, thrusters, weapons, power) and glow/transparent bits. Resolve the
@@ -233,6 +291,16 @@ function buildAircraftMesh(design){
   }
   group.userData.dropTanks = dropTanks;
   mergeStaticMeshes(group);    // collapse the static airframe to a handful of draw calls
+  // SHADOW OPT: auto-turrets are kept as un-merged nodes (they traverse to aim), so each of
+  // their many sub-meshes (ring/dome/barrels/muzzle) is a separate draw call in the sun's
+  // shadow pass. A heavy warship mounts dozens of guns — that's a lot of small, fast-moving
+  // silhouettes the shadow map gains nothing from. Drop their shadow casting (the airframe
+  // and the deck below still cast/receive, so the ship's outline is unchanged). Aim/muzzle
+  // math reads node.position/quaternion only, never castShadow — untouched.
+  for (const node of group.children){
+    const k = node.userData && node.userData.partKey;
+    if (k && PARTS[k] && PARTS[k].autoTurret) node.traverse(o => { if (o.isMesh) o.castShadow = false; });
+  }
   return group;
 }
 
@@ -650,7 +718,7 @@ class Sim {
       // a piloted SHIP's deck torpedo tubes AUTO-launch (like its guns do via updateTurrets);
       // an AIRCRAFT's torpedo stays a manual drop the pilot aims (scaleMul===1).
       if (w.torpedo && scaleMul > 1) torpedoMounts.push({ w: { ...w, cool: 0 }, node });
-      else if (w.turret) turrets.push({ w, node, aimYaw: 0, target: null });
+      else if (w.turret){ if (PARTS[w.partKey] && PARTS[w.partKey].autoTurret) mergeTurretNode(node); turrets.push({ w, node, aimYaw: 0, target: null }); }
       else if (w.type === 'melee'){            // a ram blade — contact damage, never in the weapon cycle
         const reach = (w.reach || 24) * scaleMul;
         if (!melee || w.dmg > melee.dmg) melee = { dmg: w.dmg, reach, gap: w.gap || 0.5, cool: 0 };
@@ -658,9 +726,24 @@ class Sim {
       else { w.node = node; weapons.push(w); }
     }
 
+    // HULL-SHAPED HITBOX: an oriented box in the craft's local frame — centre corrected for the
+    // part-centroid recentre, half-extents from the design bbox × render scale, plus a little
+    // arcade slop (clipping a wingtip still counts). Replaces the old bounding sphere, which
+    // ballooned far beyond thin airframes and long hulls (see segHitsHull).
+    const _bb = stats.bbox, _co = group.userData.centroidOff || { x: 0, y: 0, z: 0 };
+    const hullCenter = new THREE.Vector3(
+      ((_bb.min.x + _bb.max.x) / 2 - _co.x) * scaleMul,
+      ((_bb.min.y + _bb.max.y) / 2 - _co.y) * scaleMul,
+      ((_bb.min.z + _bb.max.z) / 2 - _co.z) * scaleMul);
+    const hullHalf = new THREE.Vector3(
+      Math.max(_bb.size.x / 2 * scaleMul + 0.8, 2),
+      Math.max(_bb.size.y / 2 * scaleMul + 0.8, 2),
+      Math.max(_bb.size.z / 2 * scaleMul + 0.8, 2));
+
     const fwd = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
     const craft = {
       design, stats, group,
+      hullCenter, hullHalf,                // oriented-box hitbox (local frame; see segHitsHull)
       team, isPlayer: false, isAI: !!isAI, isRemote: false,
       scaleMul,                            // >1 for a ship/carrier hull flown as a craft
       isShipCraft: scaleMul > 1,           // a piloted SHIP: floats on the sea, never an aircraft
@@ -747,23 +830,55 @@ class Sim {
           .filter(w => w.torpedo)
           .map(w => ({ w: { ...w, cool: 0 }, node: claimNode(w.partKey) }))
       : [];
+    // PERF: a warship mounts MANY auto-turrets, each an un-merged cluster of sub-meshes at
+    // CARRIER_SCALE — the dominant draw-call cost of a fleet battle. Collapse each turret's
+    // rigid internals now (the node still traverses to aim). Gated on autoTurret, so fixed
+    // deck guns (baked, empty nodes) and torpedo tubes are skipped.
+    for (const t of turrets){ const td = PARTS[t.w.partKey]; if (td && td.autoTurret) mergeTurretNode(t.node); }
 
-    // collision radius tracks the rendered hull (design bbox × SHIP_SCALE)
+    // collision radius tracks the rendered hull (design bbox × SHIP_SCALE) — kept as the
+    // BROAD radius for ship-ship shoving / melee / standoff maths. Precise SHOT hits use
+    // the oriented hull box below (segHitsHull): a long hull is no longer a giant sphere
+    // that "catches" rounds metres beside and above the deck.
     const hbb = designStats && designStats.bbox ? designStats.bbox.size : null;
     const hitR = hbb ? Math.max(hbb.x, hbb.z) * 0.55 * CARRIER_SCALE : (design ? 60 : 150);
+    let hullCenter, hullHalf;
+    if (designStats && designStats.bbox){
+      const _bb = designStats.bbox, _co = mesh.userData.centroidOff || { x: 0, y: 0, z: 0 };
+      hullCenter = new THREE.Vector3(
+        ((_bb.min.x + _bb.max.x) / 2 - _co.x) * CARRIER_SCALE,
+        ((_bb.min.y + _bb.max.y) / 2 - _co.y) * CARRIER_SCALE,
+        ((_bb.min.z + _bb.max.z) / 2 - _co.z) * CARRIER_SCALE);
+      hullHalf = new THREE.Vector3(
+        Math.max(_bb.size.x / 2 * CARRIER_SCALE + 2, 4),
+        Math.max(_bb.size.y / 2 * CARRIER_SCALE + 2, 4),
+        Math.max(_bb.size.z / 2 * CARRIER_SCALE + 2, 4));
+    } else {
+      // default slab carrier: hull 70×~34×300 around a deck at y≈6
+      hullCenter = new THREE.Vector3(0, 4, 0);
+      hullHalf = new THREE.Vector3(36, 26, 150);
+    }
     // ship cruise speed scales INVERSELY with mass — a light corvette is fast (→ blitz), a
     // heavy battleship is slow (→ crescent). This speed is what drives the formation choice.
     // naval cruise from the design's actual propulsion (engines → speed), capped to a sane band —
     // a ship now MOVES at the speed its stat advertises, instead of an unrelated mass-only crawl.
     const shipSpeed = isShip ? navalCruise(designStats) : 24;
+    // Hull steering: a cruiser is quickest on the helm; other hulls turn slower the bigger they are.
+    // heading0 points the bow at the enemy's side so a ship starts a charge already lined up.
+    const turnRate = isCruiser ? SHIP_TURN_CRUISER : SHIP_TURN_RATE * clamp(SHIP_TURN_REF_R / hitR, 0.4, 1.4);
+    // a ship starts bow-on to the enemy's side (charges along Z); a slab carrier starts along its X lane
+    const heading0 = isShip ? (team === 1 ? Math.PI : 0) : Math.atan2((team === 1 ? -1 : 1) * 6, 0);
+    mesh.rotation.y = heading0;
     const carrier = {
       design, mesh, team, hitR,
+      hullCenter, hullHalf,           // oriented-box hitbox (local frame; see segHitsHull)
       pos: mesh.position,
       vel: isShip ? new THREE.Vector3() : new THREE.Vector3((team === 1 ? -1 : 1) * 6, 0, 0),  // ships steer under pursuit AI; carriers steam slowly
       hp, maxHp: hp,
       alive: true,
       pdRange: 1700, pdSpeed: 1100, pdCool: 0,
       isCarrier: true,
+      heading: heading0, turnRate,    // slewed hull heading (rad) + max helm rate (rad/s); see updateCarrier
       isShip, isCruiser, shipSpeed,   // isShip → hunts targets; isCruiser → solo flank charge, no formation
       // naval-squadron state (set per-frame by updateFleets): same-type units form up.
       // A cruiser stays inFleet:false and steams at flank, so it always charges (see updateCarrier).
@@ -855,7 +970,9 @@ class Sim {
 
   resizeHUD(){
     if (!this.hudCanvas) return;
-    const dpr = Math.min(devicePixelRatio || 1, 2);
+    // cap the HUD overlay at 1.5× — reticles/markers/bars don't need full Retina, and 2×
+    // nearly doubles the 2D-canvas fill redrawn EVERY frame on top of the 3D render.
+    const dpr = Math.min(devicePixelRatio || 1, 1.5);
     this.hudCanvas.width = innerWidth * dpr;
     this.hudCanvas.height = innerHeight * dpr;
     this.hudCanvas.style.width = innerWidth + 'px';
@@ -990,6 +1107,7 @@ class Sim {
     // 6. carriers / ships — form same-type squadrons, then move + point-defend
     this.updateFleets(dt);
     for (const cc of this.carriers){ if (cc.alive) this.updateCarrier(cc, dt); }
+    this.updateShipCollisions(dt);  // solid vessel hit-boxes — keep enemy hulls from interpenetrating (no damage)
 
     // 7. ordnance
     this.updateBullets(dt);
@@ -1807,14 +1925,34 @@ class Sim {
   // ---------------------------------------------------------------------
   //  HIT TESTS
   // ---------------------------------------------------------------------
+  // HULL-SHAPED hit test: slab-intersect the shot segment against the unit's ORIENTED box
+  // (hullCenter/hullHalf in its local frame). Replaces the old bounding SPHERE, which on a
+  // long ship flagged hits metres of empty air beside/above the hull, and ballooned a thin
+  // airframe's profile vertically. `pad` inflates every face (missile/torpedo proximity).
+  segHitsHull(a, b, o, pad){
+    const q = _TQ2.copy((o.group || o.mesh).quaternion).invert();
+    const la = _TV.copy(a).sub(o.pos).applyQuaternion(q).sub(o.hullCenter);
+    const lb = _TV2.copy(b).sub(o.pos).applyQuaternion(q).sub(o.hullCenter);
+    const h = o.hullHalf;
+    let t0 = 0, t1 = 1;
+    for (const ax of ['x', 'y', 'z']){
+      const p0 = la[ax], d = lb[ax] - p0, e = h[ax] + pad;
+      if (Math.abs(d) < 1e-9){ if (p0 < -e || p0 > e) return false; continue; }
+      let u = (-e - p0) / d, v = (e - p0) / d;
+      if (u > v){ const w = u; u = v; v = w; }
+      if (u > t0) t0 = u;
+      if (v < t1) t1 = v;
+      if (t0 > t1) return false;
+    }
+    return true;
+  }
   segHitsCraft(a, b, o, pad = 0){
+    if (o.hullHalf) return this.segHitsHull(a, b, o, pad);
     const r = (o.stats.bbox ? Math.max(o.stats.bbox.size.x, o.stats.bbox.size.z) * 0.6 : 8) * (o.scaleMul || 1) + pad;
     return distSegPoint(a, b, o.pos) <= r;
   }
   segHitsCarrier(a, b, o, pad = 0){
-    // carriers are big oriented boxes; approximate sphere. A design carrier's radius is
-    // computed from its hull × SHIP_SCALE (o.hitR) so it tracks the rendered size; the
-    // default slab carrier (no design) keeps its fixed 150.
+    if (o.hullHalf) return this.segHitsHull(a, b, o, pad);
     const r = (o.hitR || (o.design ? 60 : 150)) + pad;
     return distSegPoint(a, b, o.pos) <= r;
   }
@@ -2009,7 +2147,8 @@ class Sim {
     // A CRUISER skips formation entirely — it ALWAYS steams at flank toward the enemy.
     if (cc.isCruiser) sp = (cc.shipSpeed || 24) * FLEET_CHARGE_MUL;
 
-    if (cc.inFleet && cc.fleetLeader && cc.fleetLeader !== cc && cc.fleetLeader.alive){
+    const isFollower = cc.inFleet && cc.fleetLeader && cc.fleetLeader !== cc && cc.fleetLeader.alive;
+    if (isFollower){
       // FOLLOWER: hold a station in the squadron's chosen FORMATION, relative to the leader in
       // the fleet heading frame. blitz/wedge trail BEHIND the leader (arrowhead); a crescent's
       // wings sweep AHEAD to envelop. rank = how far out from the spine, side = which wing.
@@ -2033,8 +2172,8 @@ class Sim {
       }
       if (tgt){
         const dist = Math.sqrt(bd) || 1, tx = (tgt.pos.x - cc.pos.x) / dist, tz = (tgt.pos.z - cc.pos.z) / dist;
-        if (dist > F.standoff){
-          cc.vel.set(tx * sp, 0, tz * sp);                    // charge the target
+        if (cc.isCruiser || dist > F.standoff){
+          cc.vel.set(tx * sp, 0, tz * sp);                    // charge the target (a CRUISER bores straight in to ram — never orbits)
         } else {
           // at the formation's standoff: ORBIT the target at full speed instead of stopping — a
           // warship keeps way on. tangent (tz,-tx) for the circle + a radial nudge to hold range.
@@ -2057,8 +2196,8 @@ class Sim {
         if (air){
           const dist = Math.sqrt(ad) || 1, tx = (air.pos.x - cc.pos.x) / dist, tz = (air.pos.z - cc.pos.z) / dist;
           const AA_HOLD = 850;
-          if (dist > AA_HOLD){
-            cc.vel.set(tx * sp, 0, tz * sp);                   // close to put it in flak range
+          if (cc.isCruiser || dist > AA_HOLD){
+            cc.vel.set(tx * sp, 0, tz * sp);                   // close to flak range (a CRUISER keeps boring straight in)
           } else {
             const along = (dist - AA_HOLD) * 0.6;              // orbit its ground track, keep way on
             let vx = tz * sp + tx * along, vz = -tx * sp + tz * along;
@@ -2093,10 +2232,26 @@ class Sim {
       if (cc.pos.z >  EDGE && cc.vel.z > 0) cc.vel.z = -Math.abs(cc.vel.z);
       if (cc.pos.z < -EDGE && cc.vel.z < 0) cc.vel.z =  Math.abs(cc.vel.z);
     }
+    // STEER LIKE A SHIP: slew the hull heading toward the desired course at the helm rate so a vessel
+    // arcs into its turn instead of snapping to face its velocity each frame. A steering vessel
+    // (leader / solo / cruiser / slab) then drives its MOVEMENT along the bow, so it can't crab
+    // sideways. A FOLLOWER keeps its corrective velocity for tight station-keeping (it strafes a
+    // little into its slot) — only its visual heading is rate-limited. (cc.vel = DESIRED course+speed.)
+    const desSpd = Math.hypot(cc.vel.x, cc.vel.z);
+    if (desSpd > 0.01){
+      let d = Math.atan2(cc.vel.x, cc.vel.z) - cc.heading;
+      d = Math.atan2(Math.sin(d), Math.cos(d));                     // shortest signed angle to the wanted course
+      const maxTurn = (cc.turnRate || SHIP_TURN_RATE) * dt;
+      cc.heading += clamp(d, -maxTurn, maxTurn);
+      if (!isFollower){
+        cc.vel.x = Math.sin(cc.heading) * desSpd;                   // steam along the bow, not the raw desired vector
+        cc.vel.z = Math.cos(cc.heading) * desSpd;
+      }
+    }
     cc.pos.addScaledVector(cc.vel, dt);
     cc.pos.y = this.env.sea ? 4 + Math.sin(this.time * 0.6) * 0.6 : 14;
     cc.mesh.position.copy(cc.pos);
-    if (cc.vel.lengthSq() > 0.01) cc.mesh.rotation.y = Math.atan2(cc.vel.x, cc.vel.z);
+    cc.mesh.rotation.y = cc.heading;
 
     // point defence
     cc.pdCool -= dt;
@@ -2117,6 +2272,63 @@ class Sim {
         this.bullets.push({ mesh, trail: null, team: cc.team, owner: cc, pos: mesh.position, vel: dir.multiplyScalar(cc.pdSpeed), dmg: 28, splash: 8, life: 2.5 });
         cc.pdCool = 0.12;
         if (Math.random() < 0.2) sfx('cannon', 0.05);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  //  RAMMING — vessels have physical hit-boxes (their hit-spheres). When two enemy
+  //  vessels overlap, they collide: impact damage scales with closing speed, so a
+  //  cruiser boring in at flank gores whatever it hits. A vessel also runs over an
+  //  enemy CRAFT it overlaps (the player's ship, or a low aircraft). Per-ship cooldown
+  //  so a charge-through deals one solid hit, not a per-frame grind.
+  // ---------------------------------------------------------------------
+  updateShipCollisions(dt){
+    // Solid vessel hit-boxes. Opposing hulls can't pass through each other — any overlapping pair
+    // is pushed back apart along the line between them (the smaller hull yields more of the push).
+    // NO damage: a charging cruiser just bodies up against what it hits; weapons do the killing.
+    // ENEMY-only, so a same-type squadron's tight formation slots aren't shoved apart.
+    const ships = this.carriers;
+    // vessel ↔ vessel (separate on the XZ sea plane)
+    for (let i = 0; i < ships.length; i++){
+      const a = ships[i]; if (!a.alive) continue;
+      const rA = a.hitR || 80;
+      for (let j = i + 1; j < ships.length; j++){
+        const b = ships[j]; if (!b.alive || b.team === a.team) continue;
+        const rB = b.hitR || 80;
+        const minD = (rA + rB) * SHIP_COLLIDE_FRAC;
+        let dx = a.pos.x - b.pos.x, dz = a.pos.z - b.pos.z;
+        const d2 = dx * dx + dz * dz;
+        if (d2 >= minD * minD) continue;
+        let d = Math.sqrt(d2);
+        if (d < 1e-3){ dx = 1; dz = 0; d = 1; }                    // coincident → shove along an arbitrary axis
+        const overlap = minD - d, nx = dx / d, nz = dz / d;
+        const wa = rB / (rA + rB), wb = rA / (rA + rB);            // smaller hull (smaller radius) displaces more
+        a.pos.x += nx * overlap * wa; a.pos.z += nz * overlap * wa;
+        b.pos.x -= nx * overlap * wb; b.pos.z -= nz * overlap * wb;
+        a.mesh.position.copy(a.pos); b.mesh.position.copy(b.pos);
+      }
+    }
+    // a player-flown SHIP is solid against enemy vessels too (don't ghost through a hull). Only
+    // ship-craft collide here; aircraft fly over/around and aren't physically caught.
+    for (const cc of ships){
+      if (!cc.alive) continue;
+      const rC = cc.hitR || 80;
+      for (const o of this.craft){
+        if (!o.alive || o.team === cc.team || !o.isShipCraft) continue;
+        const rO = o.stats && o.stats.bbox ? Math.max(o.stats.bbox.size.x, o.stats.bbox.size.z) * 0.5 * (o.scaleMul || 1) : 8;
+        const minD = rC + rO;
+        let dx = o.pos.x - cc.pos.x, dz = o.pos.z - cc.pos.z;
+        const d2 = dx * dx + dz * dz;
+        if (d2 >= minD * minD) continue;
+        let d = Math.sqrt(d2);
+        if (d < 1e-3){ dx = 1; dz = 0; d = 1; }
+        const overlap = minD - d, nx = dx / d, nz = dz / d;
+        const wO = rC / (rC + rO), wC = rO / (rC + rO);
+        o.pos.x  += nx * overlap * wO; o.pos.z  += nz * overlap * wO;
+        cc.pos.x -= nx * overlap * wC; cc.pos.z -= nz * overlap * wC;
+        cc.mesh.position.copy(cc.pos);
+        if (o.mesh) o.mesh.position.copy(o.pos);
       }
     }
   }
@@ -2693,36 +2905,47 @@ class Sim {
 
   renderRadar(){
     const ctx = this.radarCtx; if (!ctx) return;
-    const S = 180, R = S / 2, scale = R / 3200;
+    // FULL-MAP OVERVIEW: a fixed, NORTH-UP map of the whole battle area (+X → right, +Z → up), so the
+    // entire battlefield is always on screen no matter where you are — not a player-centred sweep that
+    // clips the far side of the map. MAP_HALF is the arena's half-DIAGONAL (the ±2900 square is bound by
+    // its corners at ~4100 m), so the whole square battle area is inscribed in the round scope and every
+    // in-arena contact shows at its true spot. Anything that strays past that is pinned to the rim.
+    const S = 180, R = S / 2, MAP_HALF = 4100, scale = R / MAP_HALF;
     ctx.clearRect(0, 0, S, S);
     const p = this.player; if (!p) return;
-    // rings
+    // rings + crosshair
     ctx.strokeStyle = 'rgba(57,208,255,.25)'; ctx.lineWidth = 1;
     for (let r = 1; r <= 3; r++){ ctx.beginPath(); ctx.arc(R, R, R * r / 3, 0, 7); ctx.stroke(); }
     ctx.beginPath(); ctx.moveTo(R, 0); ctx.lineTo(R, S); ctx.moveTo(0, R); ctx.lineTo(S, R); ctx.stroke();
-    // Orient the radar to the player's heading (forward = up) by projecting each contact
-    // onto the player's forward/right axes. The previous yaw-rotation matrix was mis-derived
-    // and mapped contacts onto the wrong side — a bandit dead ahead could read as behind you.
-    const f = TMP.set(0, 0, 1).applyQuaternion(p.group.quaternion);
-    const flen = Math.hypot(f.x, f.z) || 1;
-    const ux = f.x / flen, uz = f.z / flen;            // unit forward in world XZ
+    // the ship-containment boundary (±2900) — the edge of the fightable water
+    const b = 2900 * scale;
+    ctx.strokeStyle = 'rgba(57,208,255,.14)'; ctx.strokeRect(R - b, R - b, b * 2, b * 2);
+    // world → radar: +X right, +Z up; clamp out-of-map contacts to the rim
+    const plot = (wx, wz) => {
+      let x = wx * scale, y = -wz * scale;
+      const m = Math.hypot(x, y);
+      if (m > R - 1){ const s = (R - 1) / m; x *= s; y *= s; }
+      return { x: R + x, y: R + y };
+    };
     const blip = (o, color, size) => {
-      const dx = o.pos.x - p.pos.x, dz = o.pos.z - p.pos.z;
-      const ahead = dx * ux + dz * uz;                 // forward component → screen up
-      const side  = dx * uz - dz * ux;                 // right component   → screen right
-      const x = R + side * scale, y = R - ahead * scale;
-      if (Math.hypot(x - R, y - R) > R) return;
+      const q = plot(o.pos.x, o.pos.z);
       ctx.fillStyle = color;
-      ctx.fillRect(x - size, y - size, size * 2, size * 2);
+      ctx.fillRect(q.x - size, q.y - size, size * 2, size * 2);
     };
     for (const o of this.craft){
       if (!o.alive || o === p) continue;
       blip(o, o.team === p.team ? '#39ff88' : '#ff4d6d', 2);
     }
     for (const cc of this.carriers){ if (cc.alive) blip(cc, cc.team === p.team ? '#39d0ff' : '#ff8844', 3.4); }
-    // player at centre
+    // player at its TRUE map position, a triangle pointing along its heading (0 rad = +Z = up)
+    const f = TMP.set(0, 0, 1).applyQuaternion(p.group.quaternion);
+    const ang = Math.atan2(f.x, f.z);
+    const pp = plot(p.pos.x, p.pos.z);
+    ctx.save();
+    ctx.translate(pp.x, pp.y); ctx.rotate(ang);
     ctx.fillStyle = '#fff'; ctx.beginPath();
-    ctx.moveTo(R, R - 5); ctx.lineTo(R - 4, R + 4); ctx.lineTo(R + 4, R + 4); ctx.closePath(); ctx.fill();
+    ctx.moveTo(0, -6); ctx.lineTo(-4, 4); ctx.lineTo(4, 4); ctx.closePath(); ctx.fill();
+    ctx.restore();
   }
 
   // ---------------------------------------------------------------------

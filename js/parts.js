@@ -81,7 +81,7 @@ export const WEAPONS = {
   // ---- new arsenal (parts added below; types reuse the sim-handled set) ----
   // MELEE: a fixed ram blade — no trigger; it gores any enemy the airframe makes contact with
   // (battle.js updateMelee). reach/gap are melee-only fields read there.
-  rambladew:   { key: 'rambladew',   name: 'Ram Blade',      type: 'melee',       dmg: 850, reach: 26, gap: 0.5 },
+  rambladew:   { key: 'rambladew',   name: 'Ram Blade',      type: 'melee',       dmg: 1800, reach: 26, gap: 0.5 },
   minigun:     { key: 'minigun',     name: 'Light Minigun',  type: 'gun',         dmg: 13,  rof: 34,  speed: 1250, clip: 2400, reload: 4,  spread: 0.026, splash: 0,  heatPerShot: 70,   tracer: '#fff6c8' },
   flak:        { key: 'flak',        name: 'Flak Cannon',    type: 'gun',         dmg: 80,  rof: 3,   speed: 820,  clip: 150,  reload: 4.5,spread: 0.012, splash: 26, heatPerShot: 300,  tracer: '#ffd58a' },
   railgun:     { key: 'railgun',     name: 'Railgun',        type: 'gun',         dmg: 300, rof: 1,   speed: 2800, clip: 40,   reload: 6,  spread: 0.0015,splash: 5,  heatPerShot: 1300, tracer: '#bfe6ff' },
@@ -1379,8 +1379,8 @@ function buildMeleeBlade(T, d, o = {}){
   const s = D(d.size); const g = new T.Group();
   const W = s[0], H = s[1], L = s[2];
   const col = o.color || '#9aa3ac', steel = { metal: 0.85, rough: 0.28 }, edge = { metal: 0.95, rough: 0.16 };
-  const len = L * 2;                            // long forward reach
-  const gap = W * 0.38;                          // the two blades sit WELL apart (railgun rails, not fork prongs)
+  const len = L * 2 * 3;                         // long forward reach — elongated 3×
+  const gap = W * 0.38 * 3.5;                     // the two blades sit WELL apart (railgun rails) — gap widened 3.5×
   // back breech + a cross-yoke that spreads the pair — exactly the railgun's twin-rail layout
   const breech = box(T, W * 0.46, H * 0.4, L * 0.3, '#2a2f35', { metal: 0.7, rough: 0.4 }); breech.position.z = -len * 0.2; g.add(breech);
   const yoke = box(T, gap * 2 + W * 0.14, H * 0.14, L * 0.12, '#4a4d52', { metal: 0.82 }); yoke.position.z = -len * 0.04; g.add(yoke);
