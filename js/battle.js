@@ -101,7 +101,6 @@ const QTMP = new THREE.Quaternion();
 // scratch for the auto-turret traverse/aim math (kept separate from the flight TMPs)
 const _TV = new THREE.Vector3(), _TV2 = new THREE.Vector3(), _TV3 = new THREE.Vector3();
 const _TQ = new THREE.Quaternion(), _TQ2 = new THREE.Quaternion();
-const _MFWD = new THREE.Vector3(), _MTIP = new THREE.Vector3();   // ram-blade (updateMelee) forward + tip
 const _ZAXIS = new THREE.Vector3(0, 0, 1);
 const _HD = new THREE.Vector3();   // scratch: fleet heading for formation station-keeping
 
@@ -2465,17 +2464,14 @@ class Sim {
   updateMelee(c, dt){
     const m = c.melee; if (!m) return;
     if (m.cool > 0){ m.cool -= dt; return; }
-    // A ram BLADE gores what it is driven INTO — model it as the blade LINE from the nose
-    // forward along the craft's +Z (length = reach), and hit anything that line passes through.
-    // (Was an omnidirectional sphere around the hull, so you gored enemies beside and even
-    // BEHIND you just by flying near them; a forward spear shouldn't.)
+    // Contact damage: gore any enemy the hull comes within `reach` of. This is a forgiving
+    // sphere on PURPOSE — a precise forward-blade line (tried + reverted) whiffed on anything
+    // even a few metres off the nose axis, so ramming almost never connected in real flight.
     const reach = m.reach;
-    const fwd = _MFWD.set(0, 0, 1).applyQuaternion(c.group.quaternion);
-    const tip = _MTIP.copy(c.pos).addScaledVector(fwd, reach);
     for (const o of this.craft){
       if (!o.alive || o.team === c.team || o === c) continue;
-      const rad = (o.stats && o.stats.bbox ? Math.max(o.stats.bbox.size.x, o.stats.bbox.size.z) * 0.5 * (o.scaleMul || 1) : 8) + 6;
-      if (distSegPoint(c.pos, tip, o.pos) <= rad){
+      const r = reach + (o.stats && o.stats.bbox ? Math.max(o.stats.bbox.size.x, o.stats.bbox.size.z) * 0.5 * (o.scaleMul || 1) : 8);
+      if (Math.hypot(c.pos.x - o.pos.x, c.pos.y - o.pos.y, c.pos.z - o.pos.z) <= r){
         this.damage(o, m.dmg, c, true);
         this.spawnSpark(o.pos, c.team === 0 ? 0x39ff88 : 0xff8844);
         this.spawnExplosion(o.pos, 0.7);
@@ -2487,7 +2483,8 @@ class Sim {
     }
     for (const cc of this.carriers){
       if (!cc.alive || cc.team === c.team) continue;
-      if (distSegPoint(c.pos, tip, cc.pos) <= (cc.hitR || 80) + 6){
+      const r = reach + (cc.hitR || 80);
+      if (Math.hypot(c.pos.x - cc.pos.x, c.pos.y - cc.pos.y, c.pos.z - cc.pos.z) <= r){
         this.damage(cc, m.dmg, c, false);
         this.spawnExplosion(c.pos, 1.0);
         sfx('hit', c.isPlayer ? 0.4 : 0.12);
