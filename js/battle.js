@@ -346,6 +346,12 @@ function buildAircraftMesh(design){
         if (!o.isMesh || !o.material || !o.material.color || o.userData.glow || o.material.transparent) return;
         o.material = o.material.clone();
         o.material.color.copy(col);
+        // PAINT, not bare metal: a liveried surface is a dielectric coat over the airframe.
+        // Left at part-def metalness (0.5–0.9) it becomes a mirror of the bright PMREM sky
+        // and reads as GLOWING. Clamp painted skin to paint-like PBR values.
+        o.material.metalness = Math.min(o.material.metalness ?? 0.5, 0.32);
+        o.material.roughness = Math.max(o.material.roughness ?? 0.5, 0.55);
+        o.material.envMapIntensity = 0.65;
       });
     }
   }

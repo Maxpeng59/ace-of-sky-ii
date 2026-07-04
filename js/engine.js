@@ -16,12 +16,14 @@ let running = false, last = 0;
 // restoring full sharpness when the GPU has headroom. A complex ship battle scales the render
 // buffer down to keep framerate; the menu/hangar/light fights stay at full DPR. Touches only
 // the WebGL drawing-buffer resolution (CSS size and the separate 2D HUD canvas are unaffected).
-let dprCap = 1, dprFloor = 0.8, curDpr = 1, frameEMA = 1 / 60, adaptT = 0;
+let dprCap = 1, dprFloor = 0.7, curDpr = 1, frameEMA = 1 / 60, adaptT = 0;
 
 export function initEngine(canvasEl){
   canvas = canvasEl || document.getElementById('gl');
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-  dprCap = Math.min(devicePixelRatio || 1, 2);
+  // cap at 1.5×: the PBR env lighting is per-PIXEL, and full Retina 2× is 4× the pixels of 1×
+  // for detail invisible at combat range — the single biggest real-machine frame cost.
+  dprCap = Math.min(devicePixelRatio || 1, 1.5);
   curDpr = dprCap;
   renderer.setPixelRatio(curDpr);
   renderer.setSize(innerWidth, innerHeight, false);
