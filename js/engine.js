@@ -16,7 +16,7 @@ let running = false, last = 0;
 // restoring full sharpness when the GPU has headroom. A complex ship battle scales the render
 // buffer down to keep framerate; the menu/hangar/light fights stay at full DPR. Touches only
 // the WebGL drawing-buffer resolution (CSS size and the separate 2D HUD canvas are unaffected).
-let dprCap = 1, dprFloor = 0.7, curDpr = 1, frameEMA = 1 / 60, adaptT = 0;
+let dprCap = 1, dprFloor = 0.55, curDpr = 1, frameEMA = 1 / 60, adaptT = 0;
 
 export function initEngine(canvasEl){
   canvas = canvasEl || document.getElementById('gl');
@@ -82,15 +82,15 @@ function loop(now){
     // (toward dprFloor) to recover smoothness. EMA-smoothed so a single hitch doesn't trigger it;
     // re-evaluated twice a second; reset to full on each setScene(). Only the WebGL buffer scales.
     if (dprCap > dprFloor){
-      frameEMA += (dt - frameEMA) * 0.1;
+      frameEMA += (dt - frameEMA) * 0.12;
       adaptT += dt;
-      if (adaptT >= 0.5){
+      if (adaptT >= 0.3){                       // re-evaluate ~3×/s so it reacts fast to a heavy fight
         adaptT = 0;
-        if (frameEMA * 1000 > 17.5 && curDpr > dprFloor){
-          curDpr = Math.max(dprFloor, curDpr - 0.15);
-          renderer.setPixelRatio(curDpr);
-          renderer.setSize(innerWidth, innerHeight, false);
-        }
+        const ms = frameEMA * 1000;
+        let nd = curDpr;
+        if (ms > 18 && curDpr > dprFloor) nd = Math.max(dprFloor, curDpr - 0.2);   // slow (<55 FPS) → shed resolution
+        else if (ms < 13 && curDpr < dprCap) nd = Math.min(dprCap, curDpr + 0.1);  // headroom (>77 FPS) → restore sharpness
+        if (nd !== curDpr){ curDpr = nd; renderer.setPixelRatio(curDpr); renderer.setSize(innerWidth, innerHeight, false); }
       }
     }
   }
