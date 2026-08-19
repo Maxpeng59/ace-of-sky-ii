@@ -64,19 +64,19 @@ export const WEAPONS = {
   ir:          { key: 'ir',          name: 'IR Missile',     type: 'missile',     dmg: 380, rof: 0.5, speed: 600,  clip: 2,    reload: 6, spread: 0,     splash: 24, lockTime: 1.2, turn: 3.0 },
   radar:       { key: 'radar',       name: 'Radar Missile',  type: 'missile',     dmg: 520, rof: 0.4, speed: 800,  clip: 2,    reload: 7, spread: 0,     splash: 28, lockTime: 2.2, turn: 2.4, needsSensor: true },
   lockmissile: { key: 'lockmissile', name: 'Lock-On Missile',type: 'lockmissile', dmg: 560, rof: 0.7, speed: 720,  clip: 4,    reload: 5, spread: 0,     splash: 20, lockTime: 3.0, turn: 4.0 },
-  bomb:        { key: 'bomb',        name: 'Iron Bomb',      type: 'bomb',        dmg: 900, rof: 0.5, speed: 0,    clip: 2,    reload: 5, spread: 0,     splash: 50 },
-  bombheavy:   { key: 'bombheavy',   name: 'Heavy Bomb',     type: 'bomb',        dmg: 2200,rof: 0.3, speed: 0,    clip: 1,    reload: 8, spread: 0,     splash: 90 },
+  bomb:        { key: 'bomb',        name: 'Iron Bomb',      type: 'bomb',        dmg: 900, rof: 0.5, speed: 0,    clip: 2,    reload: 5, spread: 0,     splash: 100 },
+  bombheavy:   { key: 'bombheavy',   name: 'Heavy Bomb',     type: 'bomb',        dmg: 2200,rof: 0.3, speed: 0,    clip: 1,    reload: 8, spread: 0,     splash: 180 },
   rocketpod:   { key: 'rocketpod',   name: 'Rocket Salvo',   type: 'gun',         dmg: 55,  rof: 6,   speed: 520,  clip: 28,   reload: 5, spread: 0.02,  splash: 16, heatPerShot: 160, tracer: '#ffae5a' },
   aamheavy:    { key: 'aamheavy',    name: 'Heavy AAM',      type: 'missile',     dmg: 650, rof: 0.4, speed: 940,  clip: 2,    reload: 7, spread: 0,     splash: 32, lockTime: 1.8, turn: 2.6 },
-  clusterbomb: { key: 'clusterbomb', name: 'Cluster Bomb',   type: 'bomb',        dmg: 1400,rof: 0.4, speed: 0,    clip: 2,    reload: 6, spread: 0,     splash: 78 },
+  clusterbomb: { key: 'clusterbomb', name: 'Cluster Bomb',   type: 'bomb',        dmg: 1400,rof: 0.4, speed: 0,    clip: 2,    reload: 6, spread: 0,     splash: 156 },
   heavymg:     { key: 'heavymg',     name: 'Heavy MG',       type: 'gun',         dmg: 28,  rof: 11,  speed: 1350, clip: 800,  reload: 4, spread: 0.013, splash: 0,  heatPerShot: 90,  tracer: '#ffd58a' },
   lightcannon: { key: 'lightcannon', name: 'Light Cannon',   type: 'gun',         dmg: 55,  rof: 6,   speed: 1150, clip: 350,  reload: 3.5,spread: 0.006, splash: 5,  heatPerShot: 200, tracer: '#ffdf7a' },
   revolver:    { key: 'revolver',    name: 'Revolver Cannon',type: 'gun',         dmg: 140, rof: 2.5, speed: 1050, clip: 120,  reload: 4.5,spread: 0.004, splash: 8,  heatPerShot: 520, tracer: '#ffd24d' },
   sraam:       { key: 'sraam',       name: 'Short-Range AAM',type: 'missile',     dmg: 320, rof: 0.6, speed: 700,  clip: 2,    reload: 5, spread: 0,     splash: 22, lockTime: 0.9, turn: 4.2 },
   lraam:       { key: 'lraam',       name: 'Long-Range AAM', type: 'radar',       dmg: 600, rof: 0.3, speed: 1000, clip: 2,    reload: 8, spread: 0,     splash: 30, lockTime: 2.6, turn: 2.2, needsSensor: true },
   antiship:    { key: 'antiship',    name: 'Anti-Ship Missile',type: 'lockmissile',dmg:1400, rof: 0.4, speed: 600,  clip: 2,    reload: 8, spread: 0,     splash: 60, lockTime: 3.0, turn: 1.6 },
-  guidedbomb:  { key: 'guidedbomb',  name: 'Guided Bomb',    type: 'bomb',        dmg: 1100,rof: 0.4, speed: 0,    clip: 1,    reload: 6, spread: 0,     splash: 55 },
-  napalm:      { key: 'napalm',      name: 'Incendiary Bomb',type: 'bomb',        dmg: 700, rof: 0.5, speed: 0,    clip: 2,    reload: 5, spread: 0,     splash: 110 },
+  guidedbomb:  { key: 'guidedbomb',  name: 'Guided Bomb',    type: 'bomb',        dmg: 1100,rof: 0.4, speed: 0,    clip: 1,    reload: 6, spread: 0,     splash: 110 },
+  napalm:      { key: 'napalm',      name: 'Incendiary Bomb',type: 'bomb',        dmg: 700, rof: 0.5, speed: 0,    clip: 2,    reload: 5, spread: 0,     splash: 220 },
   torpedo:     { key: 'torpedo',     name: 'Aerial Torpedo', type: 'missile',     dmg: 1600,rof: 0.3, speed: 450,  clip: 1,    reload: 9, spread: 0,     splash: 50, lockTime: 2.0, turn: 1.5, torpedo: true, torpSpeed: 3000, runDepth: 0.15, torpRange: 4000 },
   // ---- new arsenal (parts added below; types reuse the sim-handled set) ----
   // MELEE: a fixed ram blade — no trigger; it gores any enemy the airframe makes contact with
@@ -210,10 +210,10 @@ const LIST = [
     build: (T, d) => buildMissile(T, d, '#ff4d6d', 4) },
 
   // ---------------- BOMBS ----------------
-  { key: 'bomb', name: 'Bomb Rack', category: 'bomb', size: [1, 1, 2], mass: 300, cost: 400, hp: 10, weapon: 'bomb', ammo: 2, drag: 0.22,
+  { key: 'bomb', name: 'Bomb Rack', category: 'bomb', size: [1, 1, 2], mass: 210, cost: 280, hp: 10, weapon: 'bomb', ammo: 2, drag: 0.22,
     desc: 'Unguided iron bombs. Big splash on ground and carrier targets.',
     build: (T, d) => buildBomb(T, d, 0.22, 2) },
-  { key: 'bomb_heavy', name: 'Heavy Bomb', category: 'bomb', size: [1, 1, 2], mass: 600, cost: 700, hp: 10, weapon: 'bombheavy', ammo: 1, drag: 0.4,
+  { key: 'bomb_heavy', name: 'Heavy Bomb', category: 'bomb', size: [1, 1, 2], mass: 420, cost: 490, hp: 10, weapon: 'bombheavy', ammo: 1, drag: 0.4,
     desc: 'One massive bomb. Carrier-cracker — heavy and very draggy.',
     build: (T, d) => buildBomb(T, d, 0.34, 1) },
 
@@ -327,7 +327,7 @@ const LIST = [
     build: (T, d) => buildMissile(T, d, '#ff6a4d', 1, { seeker: 'aam' }) },
 
   // ---------------- BOMBS ----------------
-  { key: 'bomb_cluster', name: 'Cluster Bomb', category: 'bomb', size: [1, 1, 2], mass: 450, cost: 650, hp: 10, weapon: 'clusterbomb', ammo: 2, drag: 0.3,
+  { key: 'bomb_cluster', name: 'Cluster Bomb', category: 'bomb', size: [1, 1, 2], mass: 315, cost: 455, hp: 10, weapon: 'clusterbomb', ammo: 2, drag: 0.3,
     desc: 'Wide-area submunitions. Saturates a big radius — ideal against soft and clustered targets.',
     build: (T, d) => buildBomb(T, d, 0.2, 2) },
 
@@ -370,10 +370,10 @@ const LIST = [
     build: (T, d) => buildCruise(T, d) },
 
   // ---------------- BOMBS ----------------
-  { key: 'bomb_guided', name: 'Guided Bomb Rack', category: 'bomb', size: [1, 1, 2], mass: 380, cost: 820, hp: 10, weapon: 'guidedbomb', ammo: 1, drag: 0.26,
+  { key: 'bomb_guided', name: 'Guided Bomb Rack', category: 'bomb', size: [1, 1, 2], mass: 266, cost: 574, hp: 10, weapon: 'guidedbomb', ammo: 1, drag: 0.26,
     desc: 'A single precision glide bomb. A seeker nose and pop-out canards walk it onto a pinpoint aimpoint.',
     build: (T, d) => buildGuidedBomb(T, d) },
-  { key: 'bomb_napalm', name: 'Incendiary Bomb Rack', category: 'bomb', size: [1, 1, 2], mass: 350, cost: 520, hp: 10, weapon: 'napalm', ammo: 2, drag: 0.28,
+  { key: 'bomb_napalm', name: 'Incendiary Bomb Rack', category: 'bomb', size: [1, 1, 2], mass: 245, cost: 364, hp: 10, weapon: 'napalm', ammo: 2, drag: 0.28,
     desc: 'A pair of finless firebombs. Low per-hit damage but the widest area soak in the game — washes the deck in flame.',
     build: (T, d) => buildNapalm(T, d) },
 

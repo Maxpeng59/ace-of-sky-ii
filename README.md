@@ -15,6 +15,7 @@
 - **Mouse** — fly toward the reticle (Gravity-Front control); the nose chases where you look.
 - **W / S** — throttle trim · **Shift** — afterburner · **Z** — cut engine (glide) · **B** — airbrake
 - **Click** — guns · **right-click / lock** — missiles · **F** — flares
+- **V** — toggle the top-down bombardment view and bomb impact/blast prediction
 - In the hangar: **click** to place a part, **Shift+drag** to turn the view, **wheel** to zoom, **R / T / Y** to rotate a part.
 
 ## Run it locally

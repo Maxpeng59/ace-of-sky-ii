@@ -480,6 +480,7 @@ class Sim {
     this.camPos = new THREE.Vector3();
     this.camLook = new THREE.Vector3();
     this.shake = 0;
+    this.bombView = false;                 // V: straight-down bombardment camera + impact prediction
 
     // lock system (the headline prediction feature)
     this.lock = new LockSystem({ range: 2800, acquireAngle: 0.40, holdAngle: 0.62, team: 0 });
@@ -1069,7 +1070,7 @@ class Sim {
     // controls legend — fades out a few seconds into the sortie
     const help = el('div', 'hud-help');
     help.innerHTML = '<b>MOUSE</b> aim &amp; fly (nose chases the reticle) · <b>SHIFT</b> boost · <b>S</b> brake · <b>Z</b> engine on/off · ' +
-      '<b>B</b> airbrake · <b>SPACE</b> fire · <b>P</b> aim-assist · <b>TAB</b>/<b>Q</b>/<b>E</b> weapon · <b>F</b> flares · <b>G</b> drop tanks · click to capture mouse';
+      '<b>B</b> airbrake · <b>V</b> bombard view · <b>SPACE</b> fire · <b>P</b> aim-assist · <b>TAB</b>/<b>Q</b>/<b>E</b> weapon · <b>F</b> flares · <b>G</b> drop tanks · click to capture mouse';
     hud.appendChild(help);
     this._helpEl = help;
     this._helpT1 = setTimeout(() => help.classList.add('fade'), 6500);
@@ -1131,6 +1132,7 @@ class Sim {
     else if (k === 'e'){ this.cycleWeapon(1); }
     else if (k === 'z'){ e.preventDefault(); this.toggleEngine(); }
     else if (k === 'b'){ this.toggleAirbrake(); }
+    else if (k === 'v' && !e.repeat){ this.toggleBombView(); }
     else if (k === 'p'){ this.assistOn = !this.assistOn; this.flashMsg(this.assistOn ? 'AIM ASSIST ON' : 'AIM ASSIST OFF', this.assistOn ? 'good' : '', 1.0); }
     else if (k === 'f'){ this.firePlayerFlare(); }
     else if (k === 'g'){ this.jettison(this.player); }
@@ -1153,6 +1155,12 @@ class Sim {
     p.airbrakeOn = !p.airbrakeOn;
     this.flashMsg(p.airbrakeOn ? 'AIRBRAKE OUT' : 'AIRBRAKE IN', '', 0.7);
     sfx('click', 0.3);
+  }
+
+  toggleBombView(){
+    this.bombView = !this.bombView;
+    this.flashMsg(this.bombView ? 'BOMBARDMENT VIEW — IMPACT PREDICTION ON' : 'CHASE VIEW', this.bombView ? 'good' : '', 1.0);
+    sfx('ui', 0.3);
   }
   onKeyUp(e){ this.keys[e.key.toLowerCase()] = false; }
 
@@ -2650,6 +2658,25 @@ class Sim {
   updateCamera(dt){
     const p = this.player;
     if (!p){ return; }
+    if (this.bombView){
+      const w = p.weapons[p.curWeapon];
+      const pred = w && w.type === 'bomb' ? this.predictBombPath(p, w) : null;
+      const impact = pred && pred.impact ? pred.impact : p.pos;
+      const target = TMP3.set((p.pos.x + impact.x) * 0.5, this.surfaceHeight(impact.x, impact.z), (p.pos.z + impact.z) * 0.5);
+      const span = Math.hypot(impact.x - p.pos.x, impact.z - p.pos.z);
+      const splash = pred ? pred.splash : 0;
+      const framedHeight = (span * 0.55 + splash * 1.3) / Math.tan(28 * DEG);
+      const eyeY = Math.max(p.pos.y + 350, target.y + Math.max(700, framedHeight));
+      const desiredTop = TMP2.set(target.x, eyeY, target.z);
+      this.camPos.lerp(desiredTop, 1 - Math.exp(-7 * dt));
+      this.camera.position.copy(this.camPos);
+      this.camera.up.set(0, 0, -1);                         // north (+Z) stays at the top of the screen
+      this.camera.lookAt(target);
+      if (this.sky) this.sky.position.copy(this.camera.position);
+      this.camera.fov = lerp(this.camera.fov, 56, 1 - Math.exp(-5 * dt));
+      this.camera.updateProjectionMatrix();
+      return;
+    }
     // The camera looks ALONG the aim reticle (not the banking nose) so the crosshair
     // stays screen-centred over an upright horizon while the airframe rolls below it
     // — the Gravity Front chase view. When dead, the last aim direction is kept.
@@ -2676,6 +2703,25 @@ class Sim {
     // boost narrows the FOV for a speed rush
     this.camera.fov = lerp(this.camera.fov, p.boost ? 58 : 66, 1 - Math.exp(-4 * dt));
     this.camera.updateProjectionMatrix();
+  }
+
+  // Follow the exact bomb integrator (gravity + light drag) forward until it
+  // reaches terrain. Shared by the V camera framing and the HUD prediction line.
+  predictBombPath(c, w){
+    const pos = this.muzzle(c, new THREE.Vector3(), w);
+    const vel = c.vel.clone();
+    const points = [pos.clone()];
+    const step = 0.12;
+    let impact = null;
+    for (let t = 0; t < 14; t += step){
+      vel.y -= 9.80665 * step;
+      vel.multiplyScalar(1 - 0.02 * step);
+      pos.addScaledVector(vel, step);
+      points.push(pos.clone());
+      const surf = this.surfaceHeight(pos.x, pos.z);
+      if (pos.y <= surf + 1){ pos.y = surf; points[points.length - 1].y = surf; impact = pos.clone(); break; }
+    }
+    return { points, impact, splash: w.splash || 40 };
   }
 
   // ---------------------------------------------------------------------
@@ -2918,20 +2964,47 @@ class Sim {
           ctx.restore();
         }
       }
-      // centre crosshair
-      ctx.save();
-      ctx.strokeStyle = 'rgba(57,255,136,.8)'; ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(W / 2 - 12, H / 2); ctx.lineTo(W / 2 - 4, H / 2);
-      ctx.moveTo(W / 2 + 4, H / 2); ctx.lineTo(W / 2 + 12, H / 2);
-      ctx.moveTo(W / 2, H / 2 - 12); ctx.lineTo(W / 2, H / 2 - 4);
-      ctx.moveTo(W / 2, H / 2 + 4); ctx.lineTo(W / 2, H / 2 + 12);
-      ctx.stroke();
-      ctx.beginPath(); ctx.arc(W / 2, H / 2, 2, 0, 7); ctx.stroke();
-      ctx.restore();
+      if (this.bombView){
+        ctx.save();
+        ctx.textAlign = 'center'; ctx.font = 'bold 16px monospace';
+        ctx.fillStyle = 'rgba(8,12,18,.62)'; ctx.fillRect(W / 2 - 180, 42, 360, 30);
+        ctx.strokeStyle = 'rgba(176,107,255,.9)'; ctx.strokeRect(W / 2 - 180, 42, 360, 30);
+        ctx.fillStyle = '#d8b8ff';
+        ctx.fillText(w && w.type === 'bomb' ? 'BOMBARDMENT VIEW  ·  V TO RETURN' : 'SELECT A BOMB FOR IMPACT PREDICTION', W / 2, 63);
+        if (w && w.type === 'bomb'){
+          const pred = this.predictBombPath(p, w);
+          ctx.beginPath(); let started = false;
+          for (const pt of pred.points){
+            const sc = this.project(pt); if (!sc.front) continue;
+            if (!started){ ctx.moveTo(sc.x, sc.y); started = true; } else ctx.lineTo(sc.x, sc.y);
+          }
+          ctx.setLineDash([9, 6]); ctx.lineWidth = 2.2; ctx.strokeStyle = 'rgba(216,184,255,.95)'; ctx.stroke(); ctx.setLineDash([]);
+          if (pred.impact){
+            const hit = this.project(pred.impact);
+            const edge = this.project(new THREE.Vector3(pred.impact.x + pred.splash, pred.impact.y, pred.impact.z));
+            const rr = Math.max(4, Math.hypot(edge.x - hit.x, edge.y - hit.y));
+            ctx.fillStyle = 'rgba(176,107,255,.13)'; ctx.strokeStyle = 'rgba(216,184,255,.95)'; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.arc(hit.x, hit.y, rr, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(hit.x - 10, hit.y); ctx.lineTo(hit.x + 10, hit.y); ctx.moveTo(hit.x, hit.y - 10); ctx.lineTo(hit.x, hit.y + 10); ctx.stroke();
+            ctx.font = 'bold 13px monospace'; ctx.fillStyle = '#ead8ff'; ctx.fillText(`IMPACT  ·  ${Math.round(pred.splash)} m BLAST`, hit.x, hit.y - rr - 10);
+          }
+        }
+        ctx.restore();
+      }
+      if (!this.bombView){
+        // centre crosshair
+        ctx.save();
+        ctx.strokeStyle = 'rgba(57,255,136,.8)'; ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(W / 2 - 12, H / 2); ctx.lineTo(W / 2 - 4, H / 2);
+        ctx.moveTo(W / 2 + 4, H / 2); ctx.lineTo(W / 2 + 12, H / 2);
+        ctx.moveTo(W / 2, H / 2 - 12); ctx.lineTo(W / 2, H / 2 - 4);
+        ctx.moveTo(W / 2, H / 2 + 4); ctx.lineTo(W / 2, H / 2 + 12);
+        ctx.stroke();
+        ctx.beginPath(); ctx.arc(W / 2, H / 2, 2, 0, 7); ctx.stroke();
+        ctx.restore();
 
-      // ---- virtual control-stick + throttle (live input feedback) ----
-      {
+        // ---- virtual control-stick + throttle (live input feedback) ----
         const cx = W / 2, cy = H - 104, R = 34;
         ctx.save();
         ctx.lineWidth = 1.2;
