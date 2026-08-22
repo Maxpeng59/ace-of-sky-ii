@@ -6,9 +6,9 @@
 //  export tools (right). Renders entirely inside #screen-hangar, owns its own
 //  Scene + camera via engine.setScene/onFrame, and tears itself down on close.
 //
-//  Forward (nose) = +Z, up = +Y. Parts are placed on an integer grid; a part's
-//  footprint after a quarter-turn rotation comes from effSize(); two parts may
-//  not occupy the same cell (occupancy set). gz increases toward the nose.
+//  Forward (nose) = +Z, up = +Y. Part corners use a half-cell lattice so odd-
+//  and even-sized footprints can share the same centreline. The footprint after
+//  a quarter-turn rotation comes from effSize(). gz increases toward the nose.
 // ============================================================================
 import * as THREE from 'three';
 import { clamp, el, clear, $, fmtCr, fmtMass, fmtNum, fmtTime, sfx, toast } from './util.js';
@@ -25,6 +25,11 @@ let S = null;   // the active session object, or null when closed
 // quarter-turn helpers ------------------------------------------------------
 const QTURN = Math.PI / 2;
 const EIGHTH = Math.PI / 4;                 // 45° rotation step
+const BUILD_STEP = 0.5;                     // half-cell corners let odd/even parts align by centre
+const snapBuild = (v) => {
+  const n = Math.round(v / BUILD_STEP) * BUILD_STEP;
+  return Object.is(n, -0) ? 0 : n;
+};
 // Combine an axis's quarter-turn field (rot/rx/rz, 0-3, ×90°) with its 45° half-step flag
 // (hy/hp/hr, 0/1) into eighth-turns (0-7). Half-flags default to 0, so a legacy design —
 // where they're absent — yields rot×2 eighths = the same 90°-multiple angle as before.
@@ -38,17 +43,11 @@ function placePos(p){
   return new THREE.Vector3(c.x, c.y, c.z);
 }
 
-// The set of grid cells a placed part occupies (string keys "gx,gy,gz").
-function cellsOf(p){
+function footprint(p){
   const def = PARTS[p.key];
+  if (!def) return null;
   const es = effSize(def, p.rot || 0);
-  const w = Math.max(1, Math.round(es[0])), h = Math.max(1, Math.round(es[1])), l = Math.max(1, Math.round(es[2]));
-  const out = [];
-  for (let dx = 0; dx < w; dx++)
-    for (let dy = 0; dy < h; dy++)
-      for (let dz = 0; dz < l; dz++)
-        out.push((p.gx + dx) + ',' + (p.gy + dy) + ',' + (p.gz + dz));
-  return out;
+  return { minX: p.gx, maxX: p.gx + es[0], minY: p.gy, maxY: p.gy + es[1], minZ: p.gz, maxZ: p.gz + es[2] };
 }
 
 // ----------------------------------------------------------------------------
@@ -257,7 +256,7 @@ function buildDOM(){
 
   // hint line
   const hint = el('div', 'hangar-hint');
-  hint.innerHTML = '<b>Shift+drag</b> = turn around · Wheel = zoom · Right/Middle drag = pan · ' +
+  hint.innerHTML = '<b>0.5 m snap</b> aligns odd/even parts · <b>Shift+drag</b> = turn around · Wheel = zoom · Right/Middle drag = pan · ' +
     '<b>R</b> rotate part · <b>Del</b>/right-click remove · <b>Ctrl+Z</b> undo · click a part then <b>drag the X/Y/Z arrows</b> to move it';
   stage.appendChild(hint);
   S.els.hint = hint;
@@ -667,23 +666,32 @@ function updateGhost(){
   }
   if (!hitPoint){ S.ghost.visible = false; return; }
 
-  // Resolve the target cell so the footprint tracks the cursor predictably.
+  // Resolve the target half-cell so odd/even footprints can share a centre.
   let gx, gy, gz;
   if (hits.length){
-    // Stacking on an existing part: nudge exactly one cell along the DOMINANT axis
-    // of the face normal (quantised so curved/rotated faces don't pick diagonals).
+    // Stacking on an existing part: the clicked faces touch exactly along the
+    // dominant normal axis. The other two axes still follow the cursor, snapped
+    // at 0.5 m, so a 1-wide cockpit can centre on a 2-wide fuselage (and vice versa).
     const n = hitNormal.clone(), ax = Math.abs(n.x), ay = Math.abs(n.y), az = Math.abs(n.z);
     n.set(ax >= ay && ax >= az ? Math.sign(n.x) : 0, ay > ax && ay >= az ? Math.sign(n.y) : 0, az > ax && az > ay ? Math.sign(n.z) : 0);
-    const probe = hitPoint.clone().add(n.multiplyScalar(0.5));
-    gx = Math.round(probe.x - es[0] / 2);
-    gy = Math.max(0, Math.round(probe.y - es[1] / 2));
-    gz = Math.round(probe.z - es[2] / 2);
+    gx = snapBuild(hitPoint.x - es[0] / 2);
+    gy = Math.max(0, snapBuild(hitPoint.y - es[1] / 2));
+    gz = snapBuild(hitPoint.z - es[2] / 2);
+    let o = hits[0].object;
+    while (o && o.userData.partIndex === undefined) o = o.parent;
+    const base = o && o.userData.partIndex !== undefined ? S.design.parts[o.userData.partIndex] : null;
+    const bf = base ? footprint(base) : null;
+    if (bf){
+      if (n.x > 0) gx = bf.maxX; else if (n.x < 0) gx = bf.minX - es[0];
+      if (n.y > 0) gy = bf.maxY; else if (n.y < 0) gy = Math.max(0, bf.minY - es[1]);
+      if (n.z > 0) gz = bf.maxZ; else if (n.z < 0) gz = bf.minZ - es[2];
+    }
   } else {
     // Flat build plane: no normal nudge — drop straight under the cursor at the
     // current build height (raise/lower with [ and ]).
-    gx = Math.round(hitPoint.x - es[0] / 2);
-    gy = Math.max(0, Math.round(S.planeY));
-    gz = Math.round(hitPoint.z - es[2] / 2);
+    gx = snapBuild(hitPoint.x - es[0] / 2);
+    gy = Math.max(0, snapBuild(S.planeY));
+    gz = snapBuild(hitPoint.z - es[2] / 2);
   }
 
   const cand = { key: S.pendingKey, gx, gy, gz, rot: S.pendingRot || 0, rx: S.pendingRx || 0, rz: S.pendingRz || 0,
@@ -724,12 +732,19 @@ function tintGhost(group, valid){
   });
 }
 
-// occupancy test: does `cand` overlap any existing placed part (excluding index `skip`)?
+// Geometric footprint test. A cell-key set cannot represent half-cell coordinates:
+// two offset footprints may overlap without ever producing an identical key.
 function collides(cand, skip){
   if (S.freePlace) return false;          // free-placement mode: parts may overlap/clip freely
-  const occ = new Set();
-  S.design.parts.forEach((p, i) => { if (i !== skip) for (const c of cellsOf(p)) occ.add(c); });
-  for (const c of cellsOf(cand)) if (occ.has(c)) return true;
+  const a = footprint(cand); if (!a) return false;
+  const EPS = 1e-6;
+  for (let i = 0; i < S.design.parts.length; i++){
+    if (i === skip) continue;
+    const b = footprint(S.design.parts[i]); if (!b) continue;
+    if (a.minX < b.maxX - EPS && a.maxX > b.minX + EPS &&
+        a.minY < b.maxY - EPS && a.maxY > b.minY + EPS &&
+        a.minZ < b.maxZ - EPS && a.maxZ > b.minZ + EPS) return true;
+  }
   return false;
 }
 
@@ -787,7 +802,7 @@ function symPlaneX(){
 function mirrorPart(p){
   const def = PARTS[p.key]; if (!def) return null;
   const es = effSize(def, p.rot || 0);
-  const gx = Math.round(2 * symPlaneX() - p.gx - es[0]);
+  const gx = snapBuild(2 * symPlaneX() - p.gx - es[0]);
   const my = (8 - eighths(p.rot, p.hy)) % 8;   // mirror yaw across the symmetry plane
   const mr = (8 - eighths(p.rz, p.hr)) % 8;     // …and roll
   return { key: p.key, gx, gy: p.gy, gz: p.gz,
@@ -866,10 +881,18 @@ function rotateActive(axis = 'y'){
   if (S.selected != null){
     const p = S.design.parts[S.selected];
     const ne = (eighths(p[A.q], p[A.h]) + 1) % 8;
-    // only YAW changes the grid footprint (and only across 90° boundaries) — block an overlap
-    if (!S.freePlace && axis === 'y' && collides({ ...p, rot: ne >> 1 }, S.selected)){ toast('Rotation would overlap', 'bad'); return; }
+    let cand = { ...p, [A.q]: ne >> 1, [A.h]: ne & 1 };
+    // Yaw may swap odd/even X/Z dimensions. Preserve the part's world centre by
+    // moving its lower corner onto the half-cell lattice instead of letting it jump.
+    if (axis === 'y'){
+      const def = PARTS[p.key];
+      const oldSize = effSize(def, p.rot || 0), newSize = effSize(def, ne >> 1);
+      cand.gx = snapBuild(p.gx + (oldSize[0] - newSize[0]) / 2);
+      cand.gz = snapBuild(p.gz + (oldSize[2] - newSize[2]) / 2);
+    }
+    if (!S.freePlace && collides(cand, S.selected)){ toast('Rotation would overlap', 'bad'); return; }
     pushUndo();
-    p[A.q] = ne >> 1; p[A.h] = ne & 1;
+    Object.assign(p, cand);
     rebuildAircraft();
     S.selected = S.design.parts.indexOf(p);
     highlightSelected();
@@ -1347,8 +1370,8 @@ function dragGizmo(){
   const hit = new THREE.Vector3();
   if (!S.raycaster.ray.intersectPlane(g.plane, hit)) return;
   const scalar = hit.sub(g.center).dot(g.axisDir);
-  const cells = Math.round(scalar - g.startScalar);                 // 1 grid cell = 1 m
-  const nx = g.origGx + g.kx * cells, ny = g.origGy + g.ky * cells, nz = g.origGz + g.kz * cells;
+  const cells = snapBuild(scalar - g.startScalar);
+  const nx = snapBuild(g.origGx + g.kx * cells), ny = Math.max(0, snapBuild(g.origGy + g.ky * cells)), nz = snapBuild(g.origGz + g.kz * cells);
   const p = g.partRef;
   if (p.gx === nx && p.gy === ny && p.gz === nz) return;
   if (collides({ ...p, gx: nx, gy: ny, gz: nz }, S.selected)) return;  // don't shove into another part
