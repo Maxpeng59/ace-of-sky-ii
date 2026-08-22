@@ -136,6 +136,36 @@ function pickCarrierTarget(craft, world){
   return best;
 }
 
+// Mirror battle.js's ballistic bomb step so an AI bomber releases far enough
+// AHEAD of a surface target for its carried momentum to put the bomb on deck.
+// The old "within 240 m of the carrier" gate waited until almost overhead, so
+// a jet-speed bomber's ordnance sailed hundreds of metres beyond the target.
+function bombImpactSolution(craft, world, carrier, weapon){
+  let x = craft.pos.x, y = craft.pos.y, z = craft.pos.z;
+  let vx = craft.vel.x, vy = craft.vel.y, vz = craft.vel.z;
+  const step = 0.12;
+  for (let t = step; t <= 14; t += step){
+    vy -= 9.80665 * step;
+    const drag = 1 - 0.02 * step;
+    vx *= drag; vy *= drag; vz *= drag;
+    x += vx * step; y += vy * step; z += vz * step;
+    const surface = (typeof world.surfaceHeight === 'function')
+      ? world.surfaceHeight(x, z)
+      : (world.groundY || 0);
+    if (y <= surface + 1){
+      const tvx = carrier.vel?.x || 0, tvz = carrier.vel?.z || 0;
+      const tx = carrier.pos.x + tvx * t, tz = carrier.pos.z + tvz * t;
+      const miss = Math.hypot(x - tx, z - tz);
+      // Let a direct hull strike or a useful splash hit trigger the release,
+      // without treating the carrier's long broad-phase radius as unlimited aim tolerance.
+      const hull = clamp(carrier.hitR || 70, 35, 180);
+      const splash = Math.min(160, weapon.splash || 0) * 0.65;
+      return { miss, tolerance: hull + splash };
+    }
+  }
+  return null;
+}
+
 // forward axis of a craft (nose = +Z in local space) into _fwd
 function craftForward(craft, out){
   out = out || _fwd;
@@ -437,10 +467,17 @@ export function updateBomber(craft, world, dt){
     ai.desired.set(carrier.pos.x - craft.pos.x, aimY - craft.pos.y, carrier.pos.z - craft.pos.z).normalize();
     throttle = range > 1400 ? 1 : 0.8;
 
-    // drop bombs when overhead-ish and reasonably close & lined up
+    // Pickle when the bomb's predicted ballistic impact reaches the moving
+    // carrier. This deliberately uses the same gravity/light-drag step as the
+    // live ordnance instead of an overhead proximity guess.
     const bombIdx = craft.weapons ? craft.weapons.findIndex(w => w.type === 'bomb' && (w.ammo > 0 || w.reserve > 0)) : -1;
-    if (bombIdx >= 0 && range < 700 && Math.abs(craft.pos.x - carrier.pos.x) < 240 && Math.abs(craft.pos.z - carrier.pos.z) < 240){
-      if (Math.random() < dt * 3){ craft.wantBomb = true; craft.aiWeaponIdx = bombIdx; }
+    if (bombIdx >= 0){
+      const bomb = craft.weapons[bombIdx];
+      const solution = bombImpactSolution(craft, world, carrier, bomb);
+      if (solution && solution.miss <= solution.tolerance && _fwd.dot(_to.clone().normalize()) > 0.35){
+        craft.wantBomb = true;
+        craft.aiWeaponIdx = bombIdx;
+      }
     }
     // also loose missiles at the carrier from range
     const missIdx = craft.weapons ? craft.weapons.findIndex(w => (w.type === 'missile' || w.type === 'lockmissile') && (w.ammo > 0 || w.reserve > 0)) : -1;
