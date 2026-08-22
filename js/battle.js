@@ -728,9 +728,8 @@ class Sim {
 
     // allies / wingmen (team 0). A CARRIER set as a wingman is a SHIP — it starts and
     // fights on the ocean (steaming + point-defence), never a flying aircraft. Flying
-    // wingmen form up AHEAD of and beside you — a protective screen between you and the
-    // enemy (which spawns toward +Z), so you spawn tucked in the pocket rather than out
-    // front as the first target.
+    // wingmen form a line abreast at the player's Z position, alternating left/right,
+    // so the player occupies the centre of the formation rather than its front or rear.
     let carrierAllies = 0;
     (cfg.allies || []).forEach((d, i) => {
       if (!d) return;
@@ -742,14 +741,13 @@ class Sim {
       const w = i - carrierAllies;                 // flying-wingman index (skip any carrier allies)
       const side = (w % 2) ? 1 : -1;
       const rank = Math.floor(w / 2);              // pairs bracket you: 0,0,1,1,…
-      const lateral = side * (60 + rank * 44);     // a little out to your left/right
-      const ahead = 320 + rank * 120;              // …and well AHEAD, a screen between you and the enemy (+Z)
+      const lateral = side * (70 + rank * 55);     // successive pairs spread farther left/right
+      const formationZ = -600;                     // exactly abreast of the player
       let pos;
       if (airborne){
-        pos = new THREE.Vector3(lateral, 355 + rank * 6, -600 + ahead);
+        pos = new THREE.Vector3(lateral, 360, formationZ);
       } else {
-        const sz = -600 + ahead;
-        pos = new THREE.Vector3(lateral, this.surfaceHeight(lateral, sz) + GROUND_CLEAR, sz);
+        pos = new THREE.Vector3(lateral, this.surfaceHeight(lateral, formationZ) + GROUND_CLEAR, formationZ);
       }
       const allySkill = d.skill ?? d._skill ?? 0.5;
       const c = this.makeCraft(d, 0, pos, 0, true, allySkill);
