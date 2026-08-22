@@ -160,7 +160,7 @@ function bombImpactSolution(craft, world, carrier, weapon){
       // without treating the carrier's long broad-phase radius as unlimited aim tolerance.
       const hull = clamp(carrier.hitR || 70, 35, 180);
       const splash = Math.min(160, weapon.splash || 0) * 0.65;
-      return { miss, tolerance: hull + splash };
+      return { miss, tolerance: hull + splash, impactX: x, impactZ: z, targetX: tx, targetZ: tz, time: t };
     }
   }
   return null;
@@ -452,6 +452,9 @@ export function updateBomber(craft, world, dt){
   const terrain = terrainRisk(craft, world, ai);
   const alt = terrain.clearance;
   let throttle = 0.85, boost = false;
+  const bombIdx = craft.weapons ? craft.weapons.findIndex(w => w.type === 'bomb' && (w.ammo > 0 || w.reserve > 0)) : -1;
+  const bomb = bombIdx >= 0 ? craft.weapons[bombIdx] : null;
+  const bombSolution = bomb ? bombImpactSolution(craft, world, carrier, bomb) : null;
 
   // missile threat → quick jink + flares, but keep pressing the attack
   let incoming = null, incomingD = Infinity;
@@ -462,27 +465,38 @@ export function updateBomber(craft, world, dt){
     if (incoming.kind === 'ir' && craft.flares > 0 && Math.random() < 0.08) craft.wantFlare = true;
     throttle = 1; boost = true;
   } else {
-    // fly toward the carrier, holding a bombing altitude band
-    const aimY = carrier.pos.y + clamp((180 - alt), -60, 220) + 90;
-    ai.desired.set(carrier.pos.x - craft.pos.x, aimY - craft.pos.y, carrier.pos.z - craft.pos.z).normalize();
-    throttle = range > 1400 ? 1 : 0.8;
-
-    // Pickle when the bomb's predicted ballistic impact reaches the moving
-    // carrier. This deliberately uses the same gravity/light-drag step as the
-    // live ordnance instead of an overhead proximity guess.
-    const bombIdx = craft.weapons ? craft.weapons.findIndex(w => w.type === 'bomb' && (w.ammo > 0 || w.reserve > 0)) : -1;
-    if (bombIdx >= 0){
-      const bomb = craft.weapons[bombIdx];
-      const solution = bombImpactSolution(craft, world, carrier, bomb);
-      if (solution && solution.miss <= solution.tolerance && _fwd.dot(_to.clone().normalize()) > 0.35){
-        craft.wantBomb = true;
-        craft.aiWeaponIdx = bombIdx;
-      }
+    // Hold a stable bombing altitude instead of aiming down at a point just
+    // above the deck (which made the old run porpoise and spoiled its aim).
+    // As the bomber closes, use the predicted impact error as lateral guidance
+    // so it actively flies the bomb footprint onto the ship.
+    let aimX = carrier.pos.x - craft.pos.x;
+    let aimZ = carrier.pos.z - craft.pos.z;
+    if (bombSolution && range < 3200){
+      const correction = clamp((3200 - range) / 1800, 0.25, 1.35);
+      aimX += (bombSolution.targetX - bombSolution.impactX) * correction;
+      aimZ += (bombSolution.targetZ - bombSolution.impactZ) * correction;
     }
+    const altitudeError = clamp(220 - alt, -65, 110);
+    ai.desired.set(aimX, altitudeError * 2.2, aimZ).normalize();
+    throttle = range > 1400 ? 1 : 0.8;
     // also loose missiles at the carrier from range
     const missIdx = craft.weapons ? craft.weapons.findIndex(w => (w.type === 'missile' || w.type === 'lockmissile') && (w.ammo > 0 || w.reserve > 0)) : -1;
     if (missIdx >= 0 && range < 1800 && _fwd.dot(_to.clone().normalize()) > 0.9 && Math.random() < dt * (0.4 + ai.skill)){
       craft.wantMissile = true; craft.aiWeaponIdx = missIdx;
+    }
+  }
+
+  // Bomb release has priority over evasive jinks and missile shots. A teammate
+  // that reaches a valid solution must pickle NOW; previously the threat branch
+  // skipped this code entirely, and a missile choice could overwrite aiWeaponIdx.
+  if (bomb && bombSolution){
+    const fwdHoriz = Math.hypot(_fwd.x, _fwd.z) || 1;
+    const toHoriz = Math.hypot(_to.x, _to.z) || 1;
+    const noseOn = (_fwd.x * _to.x + _fwd.z * _to.z) / (fwdHoriz * toHoriz);
+    if (bombSolution.miss <= bombSolution.tolerance && noseOn > 0.25){
+      craft.wantBomb = true;
+      craft.wantMissile = false;
+      craft.aiWeaponIdx = bombIdx;
     }
   }
 
