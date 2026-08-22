@@ -467,6 +467,7 @@ class Sim {
     this.world = {
       craft: this.craft, carriers: this.carriers, missiles: this.missiles,
       player: null, groundY: 0, time: 0,
+      surfaceHeight: (x, z) => this.surfaceHeight(x, z),
     };
 
     // input — Gravity-Front-style FREE-AIM: the mouse moves a reticle DIRECTION
@@ -721,6 +722,8 @@ class Sim {
       // integrate's grounded branch) until it has flying speed.
       this.player.grounded = true;
       this.player.vel.set(0, 0, 0);
+    } else {
+      this.primeAirborneCraft(this.player);
     }
 
     // allies / wingmen (team 0). A CARRIER set as a wingman is a SHIP — it starts and
@@ -748,8 +751,10 @@ class Sim {
         const sz = -600 + ahead;
         pos = new THREE.Vector3(lateral, this.surfaceHeight(lateral, sz) + GROUND_CLEAR, sz);
       }
-      const c = this.makeCraft(d, 0, pos, 0, true);
+      const allySkill = d.skill ?? d._skill ?? 0.5;
+      const c = this.makeCraft(d, 0, pos, 0, true, allySkill);
       if (!airborne){ c.grounded = true; c.vel.set(0, 0, 0); }   // scramble from rest
+      else this.primeAirborneCraft(c);
       c.name = (d.name || 'Wingman ' + (i + 1));
       c.role = (this.stats(d).weapons.some(w => w.type === 'bomb')) ? 'bomber' : 'fighter';
     });
@@ -778,6 +783,7 @@ class Sim {
           const R = 1400 + (ei % 3) * 260;
           const pos = new THREE.Vector3(Math.sin(ang) * R, 320 + (ei % 4) * 70, 1400 + Math.cos(ang) * R * 0.4);
           const c = this.makeCraft(d, 1, pos, Math.PI, true, entry.skill ?? 0.5);
+          this.primeAirborneCraft(c);
           c.name = (d.name || 'Bandit') + ' ' + (ei + 1);
           c.role = isBomber ? 'bomber' : 'fighter';
           ei++;
@@ -911,6 +917,19 @@ class Sim {
     }
     this.craft.push(craft);
     return craft;
+  }
+
+  // An airborne sortie starts in established flight, not at zero airspeed.
+  // Keep genuinely powerless/invalid builds honest, while launching powered
+  // aircraft above stall speed and below their own top-speed limit.
+  primeAirborneCraft(craft){
+    const s = craft && craft.stats;
+    if (!craft || craft.isShipCraft || !s || !(s.thrust > 0) || !(s.vMax > 0)) return;
+    const stall = Number.isFinite(s.vStall) ? Math.max(0, s.vStall) : 0;
+    const launchSpeed = Math.min(s.vMax * 0.78, Math.max(s.vMax * 0.52, stall * 1.3));
+    const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(craft.group.quaternion);
+    craft.vel.copy(fwd).multiplyScalar(launchSpeed);
+    craft.speed = launchSpeed;
   }
 
   makeCarrier(design, team, pos){

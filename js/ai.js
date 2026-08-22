@@ -82,6 +82,29 @@ export function initAI(craft, skill = 0.5){
 // distance helper on raw vec3-likes
 function dist(a, b){ return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z); }
 
+// The battlefield is not flat: land can rise almost 50 m above groundY.  Look
+// ahead along the current flight path as well as beneath the aircraft so an AI
+// starts a recovery before a ridge (or a high-speed descent) becomes fatal.
+function terrainRisk(craft, world, ai){
+  const surface = (x, z) => (typeof world.surfaceHeight === 'function')
+    ? world.surfaceHeight(x, z)
+    : (world.groundY || 0);
+  const speed = Math.max(0, craft.speed || craft.vel.length());
+  const sink = Math.max(0, -craft.vel.y);
+  const lookT = lerp(1.35, 2.25, ai.skill) + clamp(speed / 500, 0, 0.55);
+  const here = surface(craft.pos.x, craft.pos.z);
+  const ahead = surface(craft.pos.x + craft.vel.x * lookT, craft.pos.z + craft.vel.z * lookT);
+  const clearance = craft.pos.y - here;
+  const projectedClearance = craft.pos.y + craft.vel.y * lookT - ahead;
+  const safe = Math.max(ai.altFloor, 85 + speed * 0.30 + sink * 2.2);
+  const lowest = Math.min(clearance, projectedClearance);
+  return {
+    clearance,
+    safe,
+    needClimb: clamp((safe - lowest) / Math.max(1, safe), 0, 1),
+  };
+}
+
 // ---------------------------------------------------------------------------
 //  Target selection — nearest living hostile within sensor/engagement range.
 //  Wingmen (team 0) hunt enemies; enemies (team 1) hunt the player & allies.
@@ -209,12 +232,10 @@ export function updateAI(craft, world, dt){
   // base desired heading: straight ahead
   ai.desired.copy(myFwd);
 
-  // altitude floor — never dive into the ground; pull up if low & descending
-  const groundY = world.groundY || 0;
-  const alt = craft.pos.y - groundY;
-  let needClimb = 0;
-  if (alt < ai.altFloor) needClimb = clamp((ai.altFloor - alt) / ai.altFloor, 0, 1);
-  if (craft.vel.y < -20 && alt < ai.altFloor * 2.2) needClimb = Math.max(needClimb, 0.4);
+  // Terrain-aware altitude floor with speed/sink-rate lookahead.
+  const terrain = terrainRisk(craft, world, ai);
+  const alt = terrain.clearance;
+  let needClimb = terrain.needClimb;
 
   // ---- state machine ----
   let throttle = 0.7, boost = false;
@@ -346,10 +367,15 @@ export function updateAI(craft, world, dt){
   }
 
   // altitude correction always layered on top
-  if (needClimb > 0){ ai.desired.y = lerp(ai.desired.y, 1, needClimb); ai.desired.normalize(); throttle = Math.max(throttle, 0.85); }
+  if (needClimb > 0){
+    ai.desired.y = lerp(ai.desired.y, 1, Math.max(0.35, needClimb));
+    ai.desired.normalize();
+    throttle = Math.max(throttle, needClimb > 0.45 ? 1 : 0.85);
+    if (needClimb > 0.45) boost = true;
+  }
 
-  // stall avoidance: if slow, drop the nose to regain speed
-  if (craft.speed < craft.stats.vStall * 1.05 && alt > ai.altFloor * 1.4){
+  // Stall recovery may lower the nose only when there is ample terrain clearance.
+  if (craft.speed < craft.stats.vStall * 1.05 && needClimb < 0.2 && alt > terrain.safe * 1.4){
     ai.desired.y = Math.min(ai.desired.y, -0.1); ai.desired.normalize(); throttle = 1;
   }
 
@@ -393,7 +419,8 @@ export function updateBomber(craft, world, dt){
   craftForward(craft, _fwd);
 
   // approach run: aim slightly above the carrier then dive the bombs in
-  const alt = craft.pos.y - (world.groundY || 0);
+  const terrain = terrainRisk(craft, world, ai);
+  const alt = terrain.clearance;
   let throttle = 0.85, boost = false;
 
   // missile threat → quick jink + flares, but keep pressing the attack
@@ -422,9 +449,17 @@ export function updateBomber(craft, world, dt){
     }
   }
 
-  // don't fly into the ground / sea
-  if (alt < ai.altFloor){ ai.desired.y = Math.max(ai.desired.y, 0.5); ai.desired.normalize(); throttle = 1; }
-  if (craft.speed < craft.stats.vStall * 1.1){ ai.desired.y = Math.min(ai.desired.y, 0); throttle = 1; }
+  // Terrain recovery has priority over stall recovery; otherwise a slow bomber
+  // could be ordered to lower its nose while already descending into a ridge.
+  if (terrain.needClimb > 0){
+    ai.desired.y = lerp(ai.desired.y, 1, Math.max(0.4, terrain.needClimb));
+    ai.desired.normalize();
+    throttle = 1;
+    if (terrain.needClimb > 0.45) boost = true;
+  }
+  if (craft.speed < craft.stats.vStall * 1.1 && terrain.needClimb < 0.2 && alt > terrain.safe * 1.4){
+    ai.desired.y = Math.min(ai.desired.y, -0.05); throttle = 1;
+  }
 
   craft.throttle = clamp(throttle, 0, 1);
   craft.boost = boost && craft.fuel > 0;
