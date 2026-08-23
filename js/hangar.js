@@ -782,6 +782,7 @@ function undo(){
   S.selected = null;
   rebuildAircraft();
   refreshStats();
+  renderSelInspector();
   emitChange(false);
   sfx('click');
 }
@@ -859,6 +860,7 @@ function deleteSelected(){
   S.selected = null;
   rebuildAircraft();
   refreshStats();
+  renderSelInspector();
   emitChange();
   sfx('hit', 0.2);
 }
@@ -1326,7 +1328,13 @@ function removeInput(){
 }
 
 function setMouse(e){
-  const r = S.els.stage.getBoundingClientRect();
+  // The shared Three.js camera renders against the FULL WebGL canvas, even
+  // though input is accepted only inside the centre hangar stage. Raycaster
+  // NDC must therefore use the canvas rectangle too. Using the narrower stage
+  // rectangle shifted every pick ray sideways, making visible parts difficult
+  // or impossible to select/delete (especially dense mirrored pairs).
+  const canvas = engine.getCanvas();
+  const r = (canvas || S.els.stage).getBoundingClientRect();
   S.mouseNDC.x = ((e.clientX - r.left) / r.width) * 2 - 1;
   S.mouseNDC.y = -((e.clientY - r.top) / r.height) * 2 + 1;
   S.haveMouse = true;
