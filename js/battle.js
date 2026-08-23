@@ -407,6 +407,14 @@ function collapseCombinedWeapons(list){
 
 function weaponMembers(w){ return w && w.linkedWeapons ? w.linkedWeapons : (w ? [w] : []); }
 
+function playerGunRecoil(w){
+  if (!w) return 0;
+  if (w.key === 'railgun') return 0.065;
+  if (w.key === 'cannon' || w.key === 'revolver') return 0.045;
+  if (w.key === 'flak' || w.key === 'lightcannon') return 0.032;
+  return 0.018;
+}
+
 // big slab "carrier" mesh (when no carrier design is supplied) ---------------
 function buildCarrierMesh(design, isSea){
   if (design && design.parts && design.parts.length){
@@ -1630,6 +1638,11 @@ class Sim {
       member.ammo -= 1;
       if (member.ammo <= 0 && (member.reserve > 0 || c.isAI)) member.reloading = member.reload;
     }
+    // One trigger action produces one restrained recoil pulse. A combined pair
+    // must not shake the camera twice just because it owns two physical muzzles.
+    if (c.isPlayer && w.type === 'gun'){
+      this.shake = Math.min(0.16, this.shake + playerGunRecoil(w));
+    }
   }
 
   // muzzle world position + forward for craft c (offset to the nose)
@@ -1677,11 +1690,9 @@ class Sim {
             this.camPos.y + c.aimDir.y * range - muzzle.y,
             this.camPos.z + c.aimDir.z * range - muzzle.z,
           ).normalize();
-          // back out the craft's own velocity (spawnBullet adds it to the round) so
-          // the bullet's TRUE trajectory — not just its launch heading — crosses the
-          // reticle. Matters most for fast jets and slow rounds (rockets).
-          const spd = w.speed || 1200;
-          dir.set(dir.x - c.vel.x / spd, dir.y - c.vel.y / spd, dir.z - c.vel.z / spd).normalize();
+          // From here player and bot rounds use identical ballistics: the same
+          // weapon spread below, followed by the same inherited craft velocity in
+          // spawnBullet(). Only the aim source differs (reticle vs bot nose).
         }
       } else dir = fwd.clone();
       if (spread){
@@ -1693,7 +1704,6 @@ class Sim {
       this.spawnBullet(c, muzzle, dir, w);
       // heat
       c.temp += (w.heatPerShot || 0) / Math.max(1, c.stats.heatCap) * 1;
-      if (c.isPlayer) this.shake = Math.min(0.5, this.shake + (w.key === 'cannon' ? 0.18 : 0.05));
       sfx(w.key === 'cannon' ? 'cannon' : (w.key === 'gatling' ? 'gatling' : 'mg'), c.isPlayer ? 0.22 : 0.09);
     } else if (w.type === 'missile' || w.type === 'radar' || w.type === 'lockmissile'){
       // homing missile toward current lock/AI target. The lock stores a lockView
@@ -2773,11 +2783,11 @@ class Sim {
     this.camPos.lerp(desired, 1 - Math.exp(-7 * dt));
 
     // shake
-    this.shake = Math.max(0, this.shake - dt * 2.2);
+    this.shake = Math.max(0, this.shake - dt * 3.5);
     const sh = this.shake;
     this.camera.position.copy(this.camPos);
-    this.camera.position.x += (Math.random() - 0.5) * sh * 2.4;
-    this.camera.position.y += (Math.random() - 0.5) * sh * 2.4;
+    this.camera.position.x += (Math.random() - 0.5) * sh * 1.2;
+    this.camera.position.y += (Math.random() - 0.5) * sh * 1.2;
     this.camera.up.set(0, 1, 0);                             // upright horizon (the plane banks, the view doesn't)
     if (this.sky) this.sky.position.copy(this.camera.position);   // skybox follows the eye (never clips to a black dome)
     const look = TMP3.copy(this.camera.position).addScaledVector(aimFwd, 120);
