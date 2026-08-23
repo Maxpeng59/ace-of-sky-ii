@@ -735,6 +735,9 @@ function onBattleEnd(result){
   const bits = [];
   if (typeof result.kills === 'number') bits.push(result.kills + ' kills');
   if (typeof result.deaths === 'number') bits.push(result.deaths + ' losses');
+  const waterLosses = ((result.lossReasons && result.lossReasons['Splashed down']) || 0) +
+    ((result.lossReasons && result.lossReasons.Ditched) || 0);
+  if (waterLosses) bits.push(waterLosses + ' splashdowns');
   if (typeof result.time === 'number') bits.push(fmtTime(result.time));
   if (typeof result.score === 'number') bits.push('score ' + Math.round(result.score));
   const detail = bits.length ? '  (' + bits.join(' · ') + ')' : '';

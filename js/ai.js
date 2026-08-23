@@ -67,6 +67,7 @@ export function initAI(craft, skill = 0.5){
     evadeT: 0,
     evadeDir: 1,
     zoomT: 0,                 // boom-&-zoom extend/climb timer (energy doctrine)
+    bombEgressT: 0,           // bomber: straight climb after a pass before turning back
     rollPhase: Math.random() * Math.PI * 2,
     panic: 0,                 // accumulates when under fire → triggers evade
     desired: new THREE.Vector3(0, 0, 1),
@@ -447,6 +448,9 @@ export function updateBomber(craft, world, dt){
   _to.set(carrier.pos.x - craft.pos.x, carrier.pos.y - craft.pos.y, carrier.pos.z - craft.pos.z);
   const range = _to.length() || 1;
   craftForward(craft, _fwd);
+  const fwdHoriz = Math.hypot(_fwd.x, _fwd.z) || 1;
+  const toHoriz = Math.hypot(_to.x, _to.z) || 1;
+  const runDot = (_fwd.x * _to.x + _fwd.z * _to.z) / (fwdHoriz * toHoriz);
 
   // approach run: aim slightly above the carrier then dive the bombs in
   const terrain = terrainRisk(craft, world, ai);
@@ -459,9 +463,33 @@ export function updateBomber(craft, world, dt){
   // missile threat → quick jink + flares, but keep pressing the attack
   let incoming = null, incomingD = Infinity;
   for (const m of world.missiles){ if (m.alive && m.team !== craft.team && m.target === craft){ const d = dist(craft.pos, m.pos); if (d < incomingD){ incomingD = d; incoming = m; } } }
+  ai.bombEgressT = Math.max(0, (ai.bombEgressT || 0) - dt);
+  // Once the ship passes behind the wing, do NOT reef into an immediate 180°
+  // turn at bombing altitude. Extend straight and climb for several seconds;
+  // only then is there enough height/separation for a heavy bomber to reverse
+  // without losing lift and splashing down.
+  if (ai.bombEgressT <= 0 && range < 1700 && runDot < -0.18) ai.bombEgressT = 8;
+  if (ai.bombEgressT > 0){
+    const egressAlt = (ai.bombAltitude || 280) + 210;
+    ai.desired.set(_fwd.x, clamp((egressAlt - alt) / 260, 0.16, 0.48), _fwd.z).normalize();
+    if (incoming && incoming.kind === 'ir' && craft.flares > 0 && Math.random() < 0.08) craft.wantFlare = true;
+    craft.throttle = 1;
+    craft.boost = craft.fuel > 0;
+    craft.aiDesired = ai.desired;
+    return;
+  }
   if (incoming && incomingD < 500){
-    _c.set(0, 1, 0).cross(_to.clone().normalize()).normalize();
-    ai.desired.copy(_c); ai.desired.normalize();
+    // A heavy bomber must not make a fighter-style 90° flat break: the steep
+    // bank sheds vertical lift and used to splash whole formations on their
+    // first defended run. Keep most of the forward attack vector, add a
+    // shallow lateral jink, and bias upward while the missile is close.
+    _d.set(_to.x, 0, _to.z).normalize();
+    _c.set(0, 1, 0).cross(_d).normalize();
+    const evadeSide = (ai.evadeDir || 1) * (craft.team === 0 ? 1 : -1);
+    const evadeAlt = ai.bombAltitude || 280;
+    ai.desired.copy(_d).multiplyScalar(0.84).addScaledVector(_c, evadeSide * 0.38);
+    ai.desired.y = clamp((evadeAlt + 80 - alt) / 260, 0.10, 0.38);
+    ai.desired.normalize();
     if (incoming.kind === 'ir' && craft.flares > 0 && Math.random() < 0.08) craft.wantFlare = true;
     throttle = 1; boost = true;
   } else {
@@ -473,10 +501,26 @@ export function updateBomber(craft, world, dt){
     let aimZ = carrier.pos.z - craft.pos.z;
     if (bombSolution && range < 3200){
       const correction = clamp((3200 - range) / 1800, 0.25, 1.35);
-      aimX += (bombSolution.targetX - bombSolution.impactX) * correction;
-      aimZ += (bombSolution.targetZ - bombSolution.impactZ) * correction;
+      const errX = bombSolution.targetX - bombSolution.impactX;
+      const errZ = bombSolution.targetZ - bombSolution.impactZ;
+      // Steer out only CROSS-TRACK error. Along-track error determines WHEN
+      // to release; feeding it into steering could move the aim point behind
+      // the bomber and command a fatal dive/reversal over the ship.
+      const fx = _fwd.x / fwdHoriz, fz = _fwd.z / fwdHoriz;
+      const along = errX * fx + errZ * fz;
+      aimX += (errX - fx * along) * correction;
+      aimZ += (errZ - fz * along) * correction;
     }
-    const altitudeError = clamp(220 - alt, -65, 110);
+    // Keep a forward flight reference through the actual overflight. Without
+    // this, the horizontal aim vector collapses near zero and even a modest
+    // altitude correction becomes a near-vertical dive command.
+    const aimHoriz = Math.hypot(aimX, aimZ);
+    if (aimHoriz < 750){
+      const ax = aimHoriz > 1 ? aimX / aimHoriz : _fwd.x / fwdHoriz;
+      const az = aimHoriz > 1 ? aimZ / aimHoriz : _fwd.z / fwdHoriz;
+      aimX = ax * 750; aimZ = az * 750;
+    }
+    const altitudeError = clamp((ai.bombAltitude || 280) - alt, -65, 110);
     ai.desired.set(aimX, altitudeError * 2.2, aimZ).normalize();
     throttle = range > 1400 ? 1 : 0.8;
     // also loose missiles at the carrier from range
@@ -490,10 +534,7 @@ export function updateBomber(craft, world, dt){
   // that reaches a valid solution must pickle NOW; previously the threat branch
   // skipped this code entirely, and a missile choice could overwrite aiWeaponIdx.
   if (bomb && bombSolution){
-    const fwdHoriz = Math.hypot(_fwd.x, _fwd.z) || 1;
-    const toHoriz = Math.hypot(_to.x, _to.z) || 1;
-    const noseOn = (_fwd.x * _to.x + _fwd.z * _to.z) / (fwdHoriz * toHoriz);
-    if (bombSolution.miss <= bombSolution.tolerance && noseOn > 0.25){
+    if (bombSolution.miss <= bombSolution.tolerance && runDot > 0.25){
       craft.wantBomb = true;
       craft.wantMissile = false;
       craft.aiWeaponIdx = bombIdx;

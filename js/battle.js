@@ -58,6 +58,7 @@ const DEG = Math.PI / 180;
 // given the body-frame roll convention in integrate(). Verified empirically.
 const BANK_SIGN = -1;
 const MAX_BANK = 1.15;            // ≈66° — the bank the auto-coordinator holds at full turn demand
+const BOMBER_MAX_BANK = 0.48;     // ≈28° — heavy bombers retain enough vertical lift in long reversals
 const GROUND_CLEAR = 8;           // belly clearance a craft rests at on the surface (must exceed the +2 crash line)
 const REPAIR_DELAY = 4;           // seconds after a hit before onboard repair bays resume mending
 const SHIP_SCALE = 2;             // the PLAYER's piloted ship (a ship/carrier design flown via makeCraft) renders at
@@ -458,7 +459,7 @@ class Sim {
 
     this.time = 0;
     this.over = false;
-    this.result = { win: false, kills: 0, deaths: 0, time: 0, score: 0, reason: '' };
+    this.result = { win: false, kills: 0, deaths: 0, lossReasons: {}, time: 0, score: 0, reason: '' };
 
     this.groundY = 0;
     this.statsCache = new Map();   // design -> stats (avoid recompute)
@@ -743,9 +744,14 @@ class Sim {
       const rank = Math.floor(w / 2);              // pairs bracket you: 0,0,1,1,…
       const lateral = side * (70 + rank * 55);     // successive pairs spread farther left/right
       const formationZ = -600;                     // exactly abreast of the player
+      // Heavy bomber groups need vertical separation as well as lateral
+      // spacing. Seven Fortresses converging at one altitude amplify every
+      // evasive bank and can lose most of the formation to the sea.
+      const bomberLoadout = this.stats(d).weapons.some(ww => ww.type === 'bomb');
+      const attackAltitude = bomberLoadout ? 360 + rank * 36 + (side > 0 ? 18 : 0) : 360;
       let pos;
       if (airborne){
-        pos = new THREE.Vector3(lateral, 360, formationZ);
+        pos = new THREE.Vector3(lateral, attackAltitude, formationZ);
       } else {
         pos = new THREE.Vector3(lateral, this.surfaceHeight(lateral, formationZ) + GROUND_CLEAR, formationZ);
       }
@@ -754,7 +760,12 @@ class Sim {
       if (!airborne){ c.grounded = true; c.vel.set(0, 0, 0); }   // scramble from rest
       else this.primeAirborneCraft(c);
       c.name = (d.name || 'Wingman ' + (i + 1));
-      c.role = (this.stats(d).weapons.some(w => w.type === 'bomb')) ? 'bomber' : 'fighter';
+      c.role = bomberLoadout ? 'bomber' : 'fighter';
+      if (bomberLoadout && c.ai){
+        c.ai.bombAltitude = attackAltitude;
+        c.ai.altFloor = Math.max(c.ai.altFloor, attackAltitude - 110);
+        c.ai.evadeDir = side;               // paired bombers break away from each other
+      }
     });
 
     if (this.net){
@@ -1356,7 +1367,8 @@ class Sim {
       // turn demand, capped at MAX_BANK), NOT a raw rate. A rate would integrate without
       // bound in a sustained turn and roll the aircraft inverted (and kill its lift).
       const bankNow = Math.atan2(right.y, up.y);
-      const bankWant = yawD * BANK_SIGN * MAX_BANK;
+      const bankCap = (!c.isPlayer && c.role === 'bomber') ? BOMBER_MAX_BANK : MAX_BANK;
+      const bankWant = yawD * BANK_SIGN * bankCap;
       const authority = clamp(up.y, 0, 1);               // fade near knife-edge/inverted so loops aren't fought
       let rollD = authority * clamp((bankWant - bankNow) * 3.0, -1, 1);
       if (c.isPlayer) rollD = clamp(rollD + (c.manualRoll || 0), -1, 1);   // manual roll layered on top
@@ -1421,7 +1433,13 @@ class Sim {
     // wing loses lift and the aircraft sinks.
     const upAxis = TMP2.set(0, 1, 0).applyQuaternion(c.group.quaternion);
     if (s.liftArea > 0 && speed > 1){
-      const liftCap = mass * 9.80665 * 1.15;     // can pull a bit more than 1g
+      // A coordinated turn needs more than 1g of TOTAL lift to keep its
+      // vertical component equal to weight. Heavy AI bombers hold long, slow
+      // reversals; the universal 1.15g cap made them bleed altitude until they
+      // hit the sea even at a shallow bank. Give their autopilot a modest
+      // 1.55g allowance while leaving player/fighter handling unchanged.
+      const liftG = (!c.isPlayer && c.role === 'bomber') ? 1.55 : 1.15;
+      const liftCap = mass * 9.80665 * liftG;
       let lift = 0.5 * RHO * s.liftArea * speed * speed * 1.1;
       if (speed < stallV) lift *= clamp(speed / Math.max(1, stallV), 0, 1) * 0.5;  // stall drop-off
       lift = Math.min(lift, liftCap);
@@ -2158,8 +2176,14 @@ class Sim {
     });
     // scoring
     if (attacker === this.player && !c.isPlayer){ this.result.kills++; this.result.score += 100 + Math.round((c.stats.cost || 0) / 100); toast(`${c.name} destroyed`, 'good'); }
-    if (c.isPlayer){
+    // "Losses" means the whole friendly air group, not just the human pilot.
+    // This also makes large wingman-formation failures visible in the result
+    // screen instead of reporting 0 while several teammates splashed down.
+    if (c.team === 0){
       this.result.deaths++;
+      this.result.lossReasons[reason] = (this.result.lossReasons[reason] || 0) + 1;
+    }
+    if (c.isPlayer){
       this.flashMsg(reason.toUpperCase(), 'bad');
       this.endBattle(false, reason);
     } else if (this.lock.target && this.lock.target._src === c){   // lock holds a lockView, not the craft — compare its source
