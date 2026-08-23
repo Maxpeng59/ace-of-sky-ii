@@ -30,9 +30,9 @@ export function statsOf(d){ return computeStats(d); }
 
 // shareable code:  ASK2.<base64(json)>   (round-trips through clipboard/text)
 export function exportCode(d){
-  // [key, gx, gy, gz, rot(yaw), rx(pitch), rz(roll), hy, hp, hr] — rx/rz and the 45° half-step
-  // flags (hy/hp/hr) are optional & default 0, so older 7-element codes stay back-compatible.
-  const lean = { n: d.name, a: d.author, r: d.role, c: d.color, p: d.parts.map(p => [p.key, p.gx, p.gy, p.gz, p.rot || 0, p.rx || 0, p.rz || 0, p.hy || 0, p.hp || 0, p.hr || 0]) };
+  // [key, gx, gy, gz, rot(yaw), rx(pitch), rz(roll), hy, hp, hr, fireGroup].
+  // Later fields are optional, so every older design code remains compatible.
+  const lean = { n: d.name, a: d.author, r: d.role, c: d.color, p: d.parts.map(p => [p.key, p.gx, p.gy, p.gz, p.rot || 0, p.rx || 0, p.rz || 0, p.hy || 0, p.hp || 0, p.hr || 0, p.fireGroup || '']) };
   try { return 'ASK2.' + btoa(unescape(encodeURIComponent(JSON.stringify(lean)))); }
   catch (e){ return 'ASK2.' + btoa(JSON.stringify(lean)); }
 }
@@ -45,7 +45,7 @@ export function importCode(str){
     const lean = JSON.parse(json);
     return {
       id: uid(), name: lean.n || 'Imported', author: lean.a || 'Unknown', role: lean.r || 'fighter', color: lean.c || '#cfd8e3',
-      parts: (lean.p || []).map(a => ({ key: a[0], gx: a[1], gy: a[2], gz: a[3], rot: a[4] || 0, rx: a[5] || 0, rz: a[6] || 0, hy: a[7] || 0, hp: a[8] || 0, hr: a[9] || 0 })),
+      parts: (lean.p || []).map(a => ({ key: a[0], gx: a[1], gy: a[2], gz: a[3], rot: a[4] || 0, rx: a[5] || 0, rz: a[6] || 0, hy: a[7] || 0, hp: a[8] || 0, hr: a[9] || 0, ...(a[10] ? { fireGroup: a[10] } : {}) })),
     };
   } catch (e){ console.warn('bad design code', e); return null; }
 }

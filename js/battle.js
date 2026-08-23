@@ -306,7 +306,8 @@ function buildAircraftMesh(design){
   const parts = (design && design.parts) || [];
   let cx = 0, cy = 0, cz = 0, n = 0;
   const dropTanks = [];     // meshes that can be jettisoned
-  for (const p of parts){
+  for (let partIndex = 0; partIndex < parts.length; partIndex++){
+    const p = parts[partIndex];
     const def = PARTS[p.key];
     if (!def || !def.build) continue;
     let obj;
@@ -322,6 +323,7 @@ function buildAircraftMesh(design){
       -((p.rot || 0) * 2 + (p.hy || 0)) * _E,
       -((p.rz || 0) * 2 + (p.hr || 0)) * _E, 'YXZ');
     obj.userData.partKey = p.key;
+    obj.userData.partIndex = partIndex;
     if (def.jettison) dropTanks.push(obj);
     obj.traverse(o => { if (o.isMesh){ o.castShadow = true; o.receiveShadow = false; } });
     group.add(obj);
@@ -378,6 +380,32 @@ function buildAircraftMesh(design){
   }
   return group;
 }
+
+// A C-linked pair remains two physical weapons with independent muzzles, ammo,
+// heat and projectiles, but occupies one selectable weapon slot.
+function collapseCombinedWeapons(list){
+  const byGroup = new Map();
+  for (const w of list){
+    if (!w.fireGroup) continue;
+    const group = byGroup.get(w.fireGroup) || [];
+    group.push(w); byGroup.set(w.fireGroup, group);
+  }
+  const used = new Set(), out = [];
+  for (const w of list){
+    if (used.has(w)) continue;
+    const group = w.fireGroup ? byGroup.get(w.fireGroup) : null;
+    const validPair = group && group.length === 2 && group.every(x =>
+      x.key === w.key && !x.turret && x.type !== 'missile' && x.type !== 'radar' && x.type !== 'lockmissile');
+    if (validPair){
+      w.linkedWeapons = group;
+      group.forEach(x => used.add(x));
+    } else used.add(w);
+    out.push(w);
+  }
+  return out;
+}
+
+function weaponMembers(w){ return w && w.linkedWeapons ? w.linkedWeapons : (w ? [w] : []); }
 
 // big slab "carrier" mesh (when no carrier design is supplied) ---------------
 function buildCarrierMesh(design, isSea){
@@ -844,13 +872,17 @@ class Sim {
     // matters on a long ship where the guns are spread metres apart. Auto-turrets traverse
     // + fire themselves (updateTurrets); manual weapons remember their mount for the muzzle.
     const _usedNodes = new Set();
-    const claimNode = (key) => { for (const o of group.children){ if (!_usedNodes.has(o) && o.userData && o.userData.partKey === key){ _usedNodes.add(o); return o; } } return null; };
-    const weapons = [];
+    const claimNode = (key, partIndex) => {
+      for (const o of group.children){ if (!_usedNodes.has(o) && o.userData && o.userData.partIndex === partIndex){ _usedNodes.add(o); return o; } }
+      for (const o of group.children){ if (!_usedNodes.has(o) && o.userData && o.userData.partKey === key){ _usedNodes.add(o); return o; } }
+      return null;
+    };
+    const manualWeapons = [];
     const turrets = [];
     const torpedoMounts = [];
     let melee = null;
     for (const w of allWeapons){
-      const node = claimNode(w.partKey);
+      const node = claimNode(w.partKey, w.mountIndex);
       // a piloted SHIP's deck torpedo tubes AUTO-launch (like its guns do via updateTurrets);
       // an AIRCRAFT's torpedo stays a manual drop the pilot aims (scaleMul===1).
       if (w.torpedo && scaleMul > 1) torpedoMounts.push({ w: { ...w, cool: 0 }, node });
@@ -859,8 +891,9 @@ class Sim {
         const reach = (w.reach || 24) * scaleMul;
         if (!melee || w.dmg > melee.dmg) melee = { dmg: w.dmg, reach, gap: w.gap || 0.5, cool: 0 };
       }
-      else { w.node = node; weapons.push(w); }
+      else { w.node = node; manualWeapons.push(w); }
     }
+    const weapons = collapseCombinedWeapons(manualWeapons);
 
     // HULL-SHAPED HITBOX: an oriented box in the craft's local frame — centre corrected for the
     // part-centroid recentre, half-extents from the design bbox × render scale, plus a little
@@ -1155,6 +1188,7 @@ class Sim {
   onKeyDown(e){
     const k = e.key.toLowerCase();
     this.keys[k] = true;
+    if ((k === ' ' || k === 'space' || k === 'spacebar') && !e.repeat) this.firePulse = true;
     if (k === 'tab'){ e.preventDefault(); this.cycleWeapon(1); }
     else if (k === 'q'){ this.cycleWeapon(-1); }
     else if (k === 'e'){ this.cycleWeapon(1); }
@@ -1323,7 +1357,7 @@ class Sim {
 
     // fire
     p.wantGun = false; p.wantMissile = false; p.wantBomb = false;
-    if (K[' '] || K['spacebar']){
+    if (this.firePulse || K[' '] || K['space'] || K['spacebar']){
       const w = p.weapons[p.curWeapon];
       if (w){
         if (w.type === 'gun') p.wantGun = true;
@@ -1332,6 +1366,7 @@ class Sim {
         else p.wantMissile = true;   // ir / radar → fire on press toward lock target
       }
     }
+    this.firePulse = false;
     p.aiWeaponIdx = p.curWeapon;
   }
 
@@ -1547,15 +1582,17 @@ class Sim {
   handleFiring(c, dt){
     if (!c.weapons || !c.weapons.length) return;
     // tick cooldown / reload on all weapons
-    for (const w of c.weapons){
-      if (w.cool > 0) w.cool -= dt;
-      if (w.reloading > 0){
-        w.reloading -= dt;
-        if (w.reloading <= 0){
-          const take = Math.min(w.clip, w.reserve > 0 ? w.reserve : w.clip);
-          w.ammo = c.isAI ? w.clip : take;            // AI gets simplified infinite-ish reloads
-          if (!c.isAI && w.reserve > 0){ w.reserve -= take; }
-          if (c.isAI) w.reserve = w.clip;
+    for (const slot of c.weapons){
+      for (const w of weaponMembers(slot)){
+        if (w.cool > 0) w.cool -= dt;
+        if (w.reloading > 0){
+          w.reloading -= dt;
+          if (w.reloading <= 0){
+            const take = Math.min(w.clip, w.reserve > 0 ? w.reserve : w.clip);
+            w.ammo = c.isAI ? w.clip : take;            // AI gets simplified infinite-ish reloads
+            if (!c.isAI && w.reserve > 0){ w.reserve -= take; }
+            if (c.isAI) w.reserve = w.clip;
+          }
         }
       }
     }
@@ -1576,19 +1613,23 @@ class Sim {
                       (w.type === 'lockmissile' && c.isAI && c.wantMissile);
 
     if (!wantsThis) return;
-    if (w.reloading > 0 || w.cool > 0) return;
-    if (w.ammo <= 0){
-      if (w.reserve > 0 || c.isAI){ w.reloading = w.reload; if (c.isPlayer && c === this.player) this.flashMsg('RELOADING…', 'warn'); }
+    const members = weaponMembers(w);
+    if (members.some(x => x.reloading > 0 || x.cool > 0)) return;
+    if (members.some(x => x.ammo <= 0)){
+      for (const x of members){ if (x.ammo <= 0 && (x.reserve > 0 || c.isAI)) x.reloading = x.reload; }
+      if (c.isPlayer && c === this.player) this.flashMsg('RELOADING…', 'warn');
       return;
     }
 
     // overheat lock-out for guns
     if (w.type === 'gun' && c.temp > c.stats.overheat * 0.98){ return; }
 
-    this.fireWeapon(c, w, idx);
-    w.cool = 1 / Math.max(0.1, w.rof);
-    w.ammo -= 1;
-    if (w.ammo <= 0 && (w.reserve > 0 || c.isAI)) w.reloading = w.reload;
+    for (const member of members){
+      this.fireWeapon(c, member, idx);
+      member.cool = 1 / Math.max(0.1, member.rof);
+      member.ammo -= 1;
+      if (member.ammo <= 0 && (member.reserve > 0 || c.isAI)) member.reloading = member.reload;
+    }
   }
 
   // muzzle world position + forward for craft c (offset to the nose)
@@ -3100,7 +3141,8 @@ class Sim {
       const w = p.weapons[p.curWeapon];
       if (w){
         const ammoTxt = w.reloading > 0 ? 'RELOAD…' : (w.ammo + (w.reserve ? '+' + w.reserve : ''));
-        this.dom.weapon.textContent = `▸ ${w.name}  [${ammoTxt}]  (${p.curWeapon + 1}/${p.weapons.length})  ✦${p.flares}`;
+        const count = weaponMembers(w).length;
+        this.dom.weapon.textContent = `▸ ${w.name}${count > 1 ? ' ×' + count : ''}  [${ammoTxt}${count > 1 ? ' each' : ''}]  (${p.curWeapon + 1}/${p.weapons.length})  ✦${p.flares}`;
       } else this.dom.weapon.textContent = 'NO WEAPONS';
       // speed / alt / throttle
       const kmh = Math.round(p.speed * 3.6);

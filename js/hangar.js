@@ -13,7 +13,7 @@
 import * as THREE from 'three';
 import { clamp, el, clear, $, fmtCr, fmtMass, fmtNum, fmtTime, sfx, toast } from './util.js';
 import { computeStats, effSize, partCenter, navalCruise, OVERHEAT_TEMP, AMBIENT_TEMP } from './physics.js';
-import { PARTS, CATEGORIES, partsByCategory, CAT_COLORS } from './parts.js';
+import { PARTS, WEAPONS, CATEGORIES, partsByCategory, CAT_COLORS } from './parts.js';
 import * as core from './core.js';
 import * as engine from './engine.js';
 
@@ -236,6 +236,9 @@ function buildDOM(){
   const mirBtn = el('button', 'btn small', '⇋ Mirror');
   mirBtn.onclick = () => { S.mirror = !S.mirror; mirBtn.classList.toggle('accent', S.mirror); toast(S.mirror ? 'Mirror ON — twin mirrors across the airframe centreline' : 'Mirror OFF', ''); sfx('click'); };
   toolbar.appendChild(mirBtn);
+  const combineBtn = el('button', 'btn small', 'Combine Pair (C)');
+  combineBtn.onclick = () => { combineSelectedWeapon(); sfx('click'); };
+  toolbar.appendChild(combineBtn);
   const delBtn = el('button', 'btn small danger', 'Delete (Del)');
   delBtn.onclick = () => { deleteSelected(); sfx('click'); };
   toolbar.appendChild(delBtn);
@@ -257,7 +260,7 @@ function buildDOM(){
   // hint line
   const hint = el('div', 'hangar-hint');
   hint.innerHTML = '<b>0.5 m snap</b> aligns odd/even parts · <b>Shift+drag</b> = turn around · Wheel = zoom · Right/Middle drag = pan · ' +
-    '<b>R</b> rotate part · <b>Del</b>/right-click remove · <b>Ctrl+Z</b> undo · click a part then <b>drag the X/Y/Z arrows</b> to move it';
+    '<b>R</b> rotate part · <b>C</b> combine identical weapon pair · <b>Del</b>/right-click remove · <b>Ctrl+Z</b> undo · click a part then <b>drag the X/Y/Z arrows</b> to move it';
   stage.appendChild(hint);
   S.els.hint = hint;
 
@@ -840,23 +843,75 @@ function selectPlaced(idx){
 }
 
 function highlightSelected(){
+  const selectedPart = S.selected != null ? S.design.parts[S.selected] : null;
+  const selectedGroup = selectedPart && selectedPart.fireGroup;
   S.partMeshes.forEach((m, i) => {
     if (!m) return;
     const on = i === S.selected;
+    const linked = !on && selectedGroup && S.design.parts[i] && S.design.parts[i].fireGroup === selectedGroup;
     m.traverse(o => {
       if (o.isMesh && o.userData.baseEmissive !== undefined){
-        o.material.emissive = new THREE.Color(on ? 0x39d0ff : o.userData.baseEmissive);
-        o.material.emissiveIntensity = on ? 0.5 : (o.userData.baseEI || 1);
+        o.material.emissive = new THREE.Color(on ? 0x39d0ff : (linked ? 0xffc857 : o.userData.baseEmissive));
+        o.material.emissiveIntensity = (on || linked) ? 0.5 : (o.userData.baseEI || 1);
       }
     });
   });
+}
+
+function weaponForPart(p){
+  const def = p && PARTS[p.key];
+  return def && def.weapon ? WEAPONS[def.weapon] : null;
+}
+
+function combineSelectedWeapon(){
+  if (S.selected == null || !S.design.parts[S.selected]){ toast('Select a weapon first', 'warn'); return; }
+  const part = S.design.parts[S.selected];
+  const def = PARTS[part.key];
+  const weapon = weaponForPart(part);
+  if (!weapon){ toast('Selected part is not a weapon', 'warn'); return; }
+  if (def.autoTurret){ toast('Auto-turrets already fire independently', 'warn'); return; }
+  if (weapon.type === 'missile' || weapon.type === 'radar' || weapon.type === 'lockmissile'){
+    toast('Missiles cannot be combined', 'bad'); return;
+  }
+
+  if (part.fireGroup){
+    const group = part.fireGroup;
+    pushUndo();
+    for (const p of S.design.parts){ if (p.fireGroup === group) delete p.fireGroup; }
+    rebuildAircraft(); refreshStats(); renderSelInspector(); emitChange();
+    toast(weapon.name + ' pair separated', '');
+    return;
+  }
+
+  const origin = placePos(part);
+  let partnerIdx = -1, bestDist = Infinity;
+  for (let i = 0; i < S.design.parts.length; i++){
+    if (i === S.selected) continue;
+    const candidate = S.design.parts[i];
+    const candidateDef = PARTS[candidate.key];
+    if (!candidateDef || candidateDef.autoTurret || candidate.fireGroup || candidateDef.weapon !== def.weapon) continue;
+    const d = placePos(candidate).distanceToSquared(origin);
+    if (d < bestDist){ bestDist = d; partnerIdx = i; }
+  }
+  if (partnerIdx < 0){ toast('Add a second identical unpaired ' + weapon.name, 'warn'); return; }
+
+  const used = new Set(S.design.parts.map(p => p.fireGroup).filter(Boolean));
+  let n = 1; while (used.has('pair' + n)) n++;
+  const group = 'pair' + n;
+  pushUndo();
+  part.fireGroup = group;
+  S.design.parts[partnerIdx].fireGroup = group;
+  rebuildAircraft(); refreshStats(); renderSelInspector(); emitChange();
+  toast(weapon.name + ' ×2 — simultaneous fire', 'good');
 }
 
 function deleteSelected(){
   if (S.selected == null) return;
   pushUndo();
   const idx = S.selected;
+  const group = S.design.parts[idx] && S.design.parts[idx].fireGroup;
   S.design.parts.splice(idx, 1);
+  if (group){ for (const p of S.design.parts){ if (p.fireGroup === group) delete p.fireGroup; } }
   S.selected = null;
   rebuildAircraft();
   refreshStats();
@@ -1110,6 +1165,13 @@ function renderSelInspector(){
   const yawDeg = (sel ? eighths(sel.rot, sel.hy) : eighths(S.pendingRot, S.pendingHy)) * 45;
   meta.textContent = metaLine(def) + ' · yaw ' + yawDeg + '°';
   box.appendChild(meta);
+  if (sel && sel.fireGroup){
+    const count = S.design.parts.filter(p => p.fireGroup === sel.fireGroup).length;
+    const combined = el('div', 'mono small');
+    combined.style.cssText = 'margin-top:7px;color:var(--gold);font-weight:700;';
+    combined.textContent = 'COMBINED FIRE ×' + count + ' · press C to separate';
+    box.appendChild(combined);
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -1436,6 +1498,7 @@ function onKeyDown(e){
   if (k === 'r'){ e.preventDefault(); rotateActive('y'); }
   else if (k === 't'){ e.preventDefault(); rotateActive('x'); }
   else if (k === 'y'){ e.preventDefault(); rotateActive('z'); }
+  else if (k === 'c'){ e.preventDefault(); combineSelectedWeapon(); }
   else if (k === 'delete' || k === 'backspace'){ e.preventDefault(); deleteSelected(); }
   else if (k === 'escape'){ if (S.pendingKey){ S.pendingKey = null; rebuildGhost(); highlightPalette(); renderSelInspector(); } else if (S.selected != null){ S.selected = null; highlightSelected(); renderSelInspector(); } }
   else if (k === 'z' && (e.ctrlKey || e.metaKey)){ e.preventDefault(); undo(); }

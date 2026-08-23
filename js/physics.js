@@ -42,7 +42,8 @@ export function computeStats(design){
   let comAcc = { x: 0, y: 0, z: 0 }, massAcc = 0;
   const min = { x: 1e9, y: 1e9, z: 1e9 }, max = { x: -1e9, y: -1e9, z: -1e9 };
 
-  for (const p of parts){
+  for (let partIndex = 0; partIndex < parts.length; partIndex++){
+    const p = parts[partIndex];
     const def = PARTS[p.key];
     if (!def){ warnings.push('Unknown part: ' + p.key); continue; }
     const c = partCenter(p, def);
@@ -80,7 +81,7 @@ export function computeStats(design){
     repair    += def.repair || 0;                 // HP/sec of in-flight self-repair (repair bays)
     if (def.weapon){
       const w = WEAPONS[def.weapon];
-      if (w){ weapons.push({ ...w, ammo: def.ammo || w.clip, mount: c, partKey: p.key, turret: !!def.autoTurret, turretRange: def.turretRange || 0 }); hardpoints++; }
+      if (w){ weapons.push({ ...w, ammo: def.ammo || w.clip, mount: c, mountIndex: partIndex, partKey: p.key, fireGroup: p.fireGroup || '', turret: !!def.autoTurret, turretRange: def.turretRange || 0 }); hardpoints++; }
     }
   }
 
