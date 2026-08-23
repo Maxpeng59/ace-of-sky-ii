@@ -381,7 +381,7 @@ function buildAircraftMesh(design){
   return group;
 }
 
-// A C-linked pair remains two physical weapons with independent muzzles, ammo,
+// A C-linked group keeps every physical weapon's independent muzzle, ammo,
 // heat and projectiles, but occupies one selectable weapon slot.
 function collapseCombinedWeapons(list){
   const byGroup = new Map();
@@ -394,9 +394,9 @@ function collapseCombinedWeapons(list){
   for (const w of list){
     if (used.has(w)) continue;
     const group = w.fireGroup ? byGroup.get(w.fireGroup) : null;
-    const validPair = group && group.length === 2 && group.every(x =>
+    const validGroup = group && group.length >= 2 && group.every(x =>
       x.key === w.key && !x.turret && x.type !== 'missile' && x.type !== 'radar' && x.type !== 'lockmissile');
-    if (validPair){
+    if (validGroup){
       w.linkedWeapons = group;
       group.forEach(x => used.add(x));
     } else used.add(w);
@@ -1638,8 +1638,8 @@ class Sim {
       member.ammo -= 1;
       if (member.ammo <= 0 && (member.reserve > 0 || c.isAI)) member.reloading = member.reload;
     }
-    // One trigger action produces one restrained recoil pulse. A combined pair
-    // must not shake the camera twice just because it owns two physical muzzles.
+    // One trigger action produces one restrained recoil pulse. A combined group
+    // must not multiply camera shake just because it owns several physical muzzles.
     if (c.isPlayer && w.type === 'gun'){
       this.shake = Math.min(0.16, this.shake + playerGunRecoil(w));
     }

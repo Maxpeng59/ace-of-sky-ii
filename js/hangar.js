@@ -236,7 +236,7 @@ function buildDOM(){
   const mirBtn = el('button', 'btn small', '⇋ Mirror');
   mirBtn.onclick = () => { S.mirror = !S.mirror; mirBtn.classList.toggle('accent', S.mirror); toast(S.mirror ? 'Mirror ON — twin mirrors across the airframe centreline' : 'Mirror OFF', ''); sfx('click'); };
   toolbar.appendChild(mirBtn);
-  const combineBtn = el('button', 'btn small', 'Combine Pair (C)');
+  const combineBtn = el('button', 'btn small', 'Combine Weapons (C)');
   combineBtn.onclick = () => { combineSelectedWeapon(); sfx('click'); };
   toolbar.appendChild(combineBtn);
   const delBtn = el('button', 'btn small danger', 'Delete (Del)');
@@ -260,7 +260,7 @@ function buildDOM(){
   // hint line
   const hint = el('div', 'hangar-hint');
   hint.innerHTML = '<b>0.5 m snap</b> aligns odd/even parts · <b>Shift+drag</b> = turn around · Wheel = zoom · Right/Middle drag = pan · ' +
-    '<b>R</b> rotate part · <b>C</b> combine identical weapon pair · <b>Del</b>/right-click remove · <b>Ctrl+Z</b> undo · click a part then <b>drag the X/Y/Z arrows</b> to move it';
+    '<b>R</b> rotate part · <b>C</b> combine identical weapons · <b>Del</b>/right-click remove · <b>Ctrl+Z</b> undo · click a part then <b>drag the X/Y/Z arrows</b> to move it';
   stage.appendChild(hint);
   S.els.hint = hint;
 
@@ -879,30 +879,26 @@ function combineSelectedWeapon(){
     pushUndo();
     for (const p of S.design.parts){ if (p.fireGroup === group) delete p.fireGroup; }
     rebuildAircraft(); refreshStats(); renderSelInspector(); emitChange();
-    toast(weapon.name + ' pair separated', '');
+    toast(weapon.name + ' group separated', '');
     return;
   }
 
-  const origin = placePos(part);
-  let partnerIdx = -1, bestDist = Infinity;
+  const groupMembers = [];
   for (let i = 0; i < S.design.parts.length; i++){
-    if (i === S.selected) continue;
     const candidate = S.design.parts[i];
     const candidateDef = PARTS[candidate.key];
     if (!candidateDef || candidateDef.autoTurret || candidate.fireGroup || candidateDef.weapon !== def.weapon) continue;
-    const d = placePos(candidate).distanceToSquared(origin);
-    if (d < bestDist){ bestDist = d; partnerIdx = i; }
+    groupMembers.push(candidate);
   }
-  if (partnerIdx < 0){ toast('Add a second identical unpaired ' + weapon.name, 'warn'); return; }
+  if (groupMembers.length < 2){ toast('Add a second identical unpaired ' + weapon.name, 'warn'); return; }
 
   const used = new Set(S.design.parts.map(p => p.fireGroup).filter(Boolean));
-  let n = 1; while (used.has('pair' + n)) n++;
-  const group = 'pair' + n;
+  let n = 1; while (used.has('group' + n)) n++;
+  const group = 'group' + n;
   pushUndo();
-  part.fireGroup = group;
-  S.design.parts[partnerIdx].fireGroup = group;
+  for (const member of groupMembers) member.fireGroup = group;
   rebuildAircraft(); refreshStats(); renderSelInspector(); emitChange();
-  toast(weapon.name + ' ×2 — simultaneous fire', 'good');
+  toast(weapon.name + ' ×' + groupMembers.length + ' — simultaneous fire', 'good');
 }
 
 function deleteSelected(){
@@ -911,7 +907,10 @@ function deleteSelected(){
   const idx = S.selected;
   const group = S.design.parts[idx] && S.design.parts[idx].fireGroup;
   S.design.parts.splice(idx, 1);
-  if (group){ for (const p of S.design.parts){ if (p.fireGroup === group) delete p.fireGroup; } }
+  if (group){
+    const remaining = S.design.parts.filter(p => p.fireGroup === group);
+    if (remaining.length < 2){ for (const p of remaining) delete p.fireGroup; }
+  }
   S.selected = null;
   rebuildAircraft();
   refreshStats();
