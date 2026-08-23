@@ -124,14 +124,14 @@ const LIST = [
     build: (T, d) => { const s = D(d.size); return cylZ(T, s[1] * 0.25, s[1] * 0.3, s[2], CAT_COLORS.structure, { metal: 0.6 }); } },
 
   // ---------------- FUEL ----------------
-  { key: 'fuel_small', name: 'Fuel Tank', category: 'fuel', size: [1, 1, 2], mass: 40, cost: 160, hp: 40, fuel: 320, drag: 0.1,
-    desc: '300 kg internal fuel. Bread-and-butter endurance.',
+  { key: 'fuel_small', name: 'Fuel Tank', category: 'fuel', size: [1, 1, 2], mass: 40, cost: 160, hp: 20, fuel: 320, drag: 0.1,
+    desc: '300 kg internal fuel. Bread-and-butter endurance — volatile tank hits deal double damage.',
     build: (T, d) => buildTank(T, d, {}) },
-  { key: 'fuel_large', name: 'Large Fuel Tank', category: 'fuel', size: [1, 1, 3], mass: 62, cost: 380, hp: 62, fuel: 500, drag: 0.14,
-    desc: '800 kg internal fuel for long-range patrol or thirsty rockets.',
+  { key: 'fuel_large', name: 'Large Fuel Tank', category: 'fuel', size: [1, 1, 3], mass: 62, cost: 380, hp: 31, fuel: 500, drag: 0.14,
+    desc: '800 kg internal fuel for long-range patrol or thirsty rockets — volatile tank hits deal double damage.',
     build: (T, d) => buildTank(T, d, {}) },
-  { key: 'fuel_drop', name: 'Drop Tank', category: 'fuel', size: [1, 1, 2], mass: 60, cost: 200, hp: 18, fuel: 280, drag: 0.32, jettison: true,
-    desc: 'External 500 kg tank. Cheap range but draggy — jettisonable in flight.',
+  { key: 'fuel_drop', name: 'Drop Tank', category: 'fuel', size: [1, 1, 2], mass: 60, cost: 200, hp: 9, fuel: 280, drag: 0.32, jettison: true,
+    desc: 'External 500 kg tank. Cheap range but draggy and volatile — jettison it before incoming fire.',
     build: (T, d) => { const s = D(d.size); const g = new T.Group(); const b = cylZ(T, s[1] * 0.4, s[1] * 0.4, s[2] * 0.8, CAT_COLORS.fuel, { metal: 0.5 }); g.add(b);
       const n = cone(T, s[1] * 0.4, s[2] * 0.3, CAT_COLORS.fuel); n.rotation.x = Math.PI / 2; n.position.z = s[2] * 0.5; g.add(n); return g; } },
 
@@ -262,11 +262,11 @@ const LIST = [
     build: (T, d) => { const s = D(d.size); return box(T, s[0] * 0.95, s[1] * 0.18, s[2] * 0.95, '#8b97a4', { metal: 0.5 }); } },
 
   // ---------------- FUEL ----------------
-  { key: 'fuel_tiny', name: 'Compact Tank', category: 'fuel', size: [1, 1, 1], mass: 20, cost: 70, hp: 20, fuel: 140, drag: 0.06,
-    desc: '140 kg of fuel in a single cell. Tops off range without committing to a big tank.',
+  { key: 'fuel_tiny', name: 'Compact Tank', category: 'fuel', size: [1, 1, 1], mass: 20, cost: 70, hp: 10, fuel: 140, drag: 0.06,
+    desc: '140 kg of fuel in a single cell. Compact, but direct tank hits deal double damage.',
     build: (T, d) => buildTank(T, d, { r: 0.42 }) },
-  { key: 'fuel_xl', name: 'XL Fuel Tank', category: 'fuel', size: [1, 1, 4], mass: 150, cost: 680, hp: 110, fuel: 700, drag: 0.22,
-    desc: '1400 kg long-range tank. For bombers, loiter drones and thirsty rockets.',
+  { key: 'fuel_xl', name: 'XL Fuel Tank', category: 'fuel', size: [1, 1, 4], mass: 150, cost: 680, hp: 55, fuel: 700, drag: 0.22,
+    desc: '1400 kg long-range tank. Huge endurance, but direct tank hits deal double damage.',
     build: (T, d) => buildTank(T, d, { r: 0.49 }) },
 
   // ---------------- ENGINES ----------------
