@@ -80,6 +80,22 @@ export function load(){
     if (raw){ const s = JSON.parse(raw); Object.assign(State, s); }
   } catch (e){ console.warn('load failed', e); }
   if (!State.library || State.library.length === 0) State.library = STOCK_DESIGNS.map(d => cloneDesign(d, ''));
+  else {
+    // Upgrade the original unarmed factory Skywhale in existing saves to the
+    // bomber loadout. Preserve the library id and user livery, and never touch
+    // renamed copies or player-authored balloon designs.
+    const stockBalloon = STOCK_DESIGNS.find(d => d.id === 'stock_balloon');
+    let upgraded = false;
+    for (const d of State.library){
+      const isOldFactoryBalloon = d && d.name === 'Skywhale Balloon' && d.author === 'Factory' && d.role === 'balloon'
+        && !(d.parts || []).some(p => p.key === 'bomb_heavy' || p.key === 'bomb_cluster' || p.key === 'bomb');
+      if (isOldFactoryBalloon && stockBalloon){
+        d.parts = JSON.parse(JSON.stringify(stockBalloon.parts));
+        upgraded = true;
+      }
+    }
+    if (upgraded) save();
+  }
   bus.emit('loaded');
 }
 export function resetSave(){ localStorage.removeItem(SAVE_KEY); }
@@ -139,14 +155,17 @@ export const STOCK_DESIGNS = [
     mk('bomb', 1, -1, 0), mk('bomb', 3, -1, 0), mk('bomb', -2, -1, 0), mk('bomb', -4, -1, 0),
     mk('sensor_radar', 0, 2, 1),
   ] },
-  // Skywhale — a true buoyant combat balloon. The long 3m gas envelope rides above
-  // a crew gondola; four turboprops give it plane-like forward motion and steering.
+  // Skywhale — a buoyant heavy bomber. The long 3m gas envelope rides above a
+  // crew gondola; four turboprops move it like a plane while heavy/cluster bombs
+  // make attacking carriers its primary job. Twin MGs provide self-defence.
   { id: 'stock_balloon', name: 'Skywhale Balloon', author: 'Factory', role: 'balloon', color: '#c9a85d', parts: [
     mk('fuel_round_l4', -1, 3, -6), mk('fuel_round_l4', -1, 3, -2), mk('fuel_round_l4', -1, 3, 2),
     mk('cockpit_mk3', 0, 0, 3), mk('fuselage_l', 0, 0, 0), mk('fuselage_l', 0, 0, -3),
     mk('prop_engine', -2, 0, 1), mk('prop_engine', 1, 0, 1), mk('prop_engine', -2, 0, -3), mk('prop_engine', 1, 0, -3),
     mk('tail_h', -2, 1, -5), mk('tail_h', 0, 1, -5), mk('tail_v', 0, 2, -5),
     mk('gun_heavymg', -1, 0, 4), mk('gun_heavymg', 1, 0, 4), mk('flare', 0, 1, -3),
+    mk('bomb_heavy', -1, -1, 1), mk('bomb_heavy', 1, -1, 1),
+    mk('bomb_cluster', -1, -1, -2), mk('bomb_cluster', 1, -1, -2),
   ] },
   // Aegis Destroyer — a surface SHIP (role 'ship'): it steams across the water toward the
   // nearest enemy vessel and shells it with naval guns. Long steel hull + sharp bow, a twin

@@ -965,6 +965,7 @@ class Sim {
       scaleMul,                            // render/hitbox/camera scale for oversized craft
       isShipCraft: isShipRole,             // a piloted SHIP: floats on the sea, never an aircraft
       isBalloon,                           // buoyant aircraft: altitude hold + dedicated climb input
+      hasBombs: weapons.some(w => w.type === 'bomb'), // AI doctrine follows the actual loadout
       name: (design && design.name) || 'Aircraft',
       role: (design && design.role) || 'fighter',
       pos: group.position,                 // alias (Vector3)
@@ -1332,12 +1333,13 @@ class Sim {
     // 1. player input → intents
     this.readPlayerInput(dt);
 
-    // 2. AI for non-player, non-remote craft. The squad brain runs first so each
-    //    fighter gets its coordinated target + flank bearing for this frame.
+    // 2. AI for non-player, non-remote craft. Any bomb-carrying aircraft uses
+    //    bomber doctrine when a hostile carrier exists (including balloons),
+    //    then falls back to fighter logic when there is nothing to bomb.
     updateSquads(this.world, dt);
     for (const c of this.craft){
       if (!c.alive || c.isPlayer || c.isRemote) continue;
-      if (c.role === 'bomber' && this.carriers.some(cc => cc.alive && cc.team !== c.team)) updateBomber(c, this.world, dt);
+      if (c.hasBombs) updateBomber(c, this.world, dt);
       else updateAI(c, this.world, dt);
     }
 
@@ -1468,7 +1470,7 @@ class Sim {
       // turn demand, capped at MAX_BANK), NOT a raw rate. A rate would integrate without
       // bound in a sustained turn and roll the aircraft inverted (and kill its lift).
       const bankNow = Math.atan2(right.y, up.y);
-      const bankCap = (!c.isPlayer && c.role === 'bomber') ? BOMBER_MAX_BANK : MAX_BANK;
+      const bankCap = (!c.isPlayer && c.hasBombs) ? BOMBER_MAX_BANK : MAX_BANK;
       const bankWant = yawD * BANK_SIGN * bankCap;
       const authority = clamp(up.y, 0, 1);               // fade near knife-edge/inverted so loops aren't fought
       let rollD = authority * clamp((bankWant - bankNow) * 3.0, -1, 1);
@@ -1551,7 +1553,8 @@ class Sim {
       // Neutral buoyancy: pitch/roll still steer the craft and engines still drive it
       // forward, but it neither stalls nor slowly falls. Space/Ctrl command a smooth
       // vertical-speed governor, so releasing both controls holds the current altitude.
-      acc.y = balloonVerticalAccel(v.y, c.balloonClimb, c.balloonDescend);
+      const aiVertical = (!c.isPlayer && c.aiDesired) ? c.aiDesired.y : 0;
+      acc.y = balloonVerticalAccel(v.y, c.balloonClimb, c.balloonDescend, aiVertical);
     } else {
       // gravity
       acc.y -= 9.80665;
@@ -1612,7 +1615,8 @@ class Sim {
       if (c.pos.y < rest) c.pos.y = rest;
       if (c.vel.y < 0) c.vel.y = 0;                 // surface holds it up
       if (c.isBalloon){
-        if (c.balloonClimb){
+        const aiLift = !c.isPlayer && c.aiDesired && c.aiDesired.y > 0.02;
+        if (c.balloonClimb || aiLift){
           c.grounded = false;
           c.vel.y = Math.max(c.vel.y, 3);
         } else {

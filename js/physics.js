@@ -17,8 +17,11 @@ export { G, RHO };
 
 // Neutral-buoyancy vertical governor used by Balloon-role craft. It is kept in
 // the shared physics module so editor/runtime tests exercise the exact same law.
-export function balloonVerticalAccel(verticalSpeed, climb, descend){
-  const target = climb ? 26 : (descend ? -18 : 0);
+export function balloonVerticalAccel(verticalSpeed, climb, descend, aiVertical = 0){
+  // Player keys are full-rate commands. AI supplies the vertical component of
+  // its desired heading, letting bomber altitude-hold and terrain recovery move
+  // balloons vertically instead of being silently discarded by buoyancy.
+  const target = climb ? 26 : (descend ? -18 : clamp(aiVertical * 80, -18, 26));
   return clamp((target - verticalSpeed) * 3.2, -32, 32);
 }
 
