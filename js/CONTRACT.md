@@ -95,7 +95,7 @@ Build each aircraft's mesh from its `parts` via `PARTS[key].build(THREE,def)` po
 Flight model derives ALL handling from `computeStats(design)` (thrust→accel, drag, lift/stall, agility→turn
 rates, fuel burn drains `fuelMass`/endurance, `thermoStep` heat → overheat damage, durability = HP pool,
 armor absorbs). Player input: **W/S** throttle, **mouse** pitch/yaw, **A/D** roll, **Shift** boost (afterburner),
-**Space** fire, **Tab/Q/E** cycle weapon, **F** flares, **G** drop tanks. Chase camera.
+**Space** fires ordinary aircraft and climbs Balloon-role craft; **Click** fires either. **Tab/Q/E** cycle weapon, **F** flares, **G** drop tanks. Chase camera.
 Combat: guns (hitscan/fast projectiles + tracers), missiles (use `homeMissile`), bombs (ballistic).
 HUD overlay on a 2D canvas `#hud-canvas` inside `#hud`: armor/fuel/boost/heat bars, weapon+ammo, radar,
 objective, speed/alt, and **the prediction/lock system** — instantiate `LockSystem`, call `.update` each

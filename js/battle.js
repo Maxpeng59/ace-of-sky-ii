@@ -15,7 +15,7 @@
 //      thermoStep heat → overheat damage, durability HP pool, armor soak,
 //      gravity, and ground/sea collision.
 //    - Player controls: W/S throttle, mouse pitch+yaw (invertY respected),
-//      A/D roll, Shift boost, Space fire, Tab/Q/E cycle weapon, F flares,
+//      A/D roll, Shift boost, Space fire (Balloon: climb), Tab/Q/E cycle weapon, F flares,
 //      G jettison drop tanks. Chase camera with lag + shake.
 //    - Combat: guns (fast tracer projectiles), missiles (homeMissile),
 //      lockmissile (LockSystem full-lock then auto-fire), bombs (ballistic).
@@ -33,7 +33,7 @@
 // ============================================================================
 import * as THREE from 'three';
 import { clamp, lerp, dampF, $, el, show, hide, sfx, toast, fmtNum, mulberry32 } from './util.js';
-import { computeStats, dragForce, thermoStep, partCenter, navalCruise, AMBIENT_TEMP, OVERHEAT_TEMP, RHO } from './physics.js';
+import { computeStats, dragForce, thermoStep, partCenter, navalCruise, balloonVerticalAccel, AMBIENT_TEMP, OVERHEAT_TEMP, RHO } from './physics.js';
 import { PARTS } from './parts.js';
 import { State, importCode, exportCode, stockGet } from './core.js';
 import { setScene, onFrame, resetView, getRenderer } from './engine.js';
@@ -64,6 +64,7 @@ const REPAIR_DELAY = 4;           // seconds after a hit before onboard repair b
 const FUEL_TANK_HIT_MULTIPLIER = 2; // a round through volatile tankage hurts the airframe twice as much
 const SHIP_SCALE = 2;             // the PLAYER's piloted ship (a ship/carrier design flown via makeCraft) renders at
                                   // this scale; its hitbox, water clearance and chase camera track it via scaleMul.
+const BALLOON_SCALE = 1.65;        // balloons are deliberately larger than ordinary aircraft in flight
 const CARRIER_SCALE = SHIP_SCALE * 2.5;  // NPC ships/carriers (makeCarrier) render 2.5× the player's vessel — bigger,
                                   // more imposing capital ships on the horizon. (= 5× true size at SHIP_SCALE 2.)
 // Naval squadrons: surface units of the SAME type (team + design) steam fast in
@@ -540,6 +541,7 @@ class Sim {
     this.keys = Object.create(null);
     this.aimYaw = 0; this.aimPitch = 0;   // free look/aim direction (radians)
     this.pointerLocked = false;
+    this.mouseFire = false;
     this.assistOn = false;                // P: auto-aim guns at the lead point on lock
 
     // camera state
@@ -569,6 +571,7 @@ class Sim {
     this._onKeyUp = this.onKeyUp.bind(this);
     this._onMouseMove = this.onMouseMove.bind(this);
     this._onMouseDown = this.onMouseDown.bind(this);
+    this._onMouseUp = this.onMouseUp.bind(this);
     this._onPointerLock = this.onPointerLock.bind(this);
     this._onContext = (e) => e.preventDefault();
   }
@@ -824,7 +827,7 @@ class Sim {
       if (!airborne){ c.grounded = true; c.vel.set(0, 0, 0); }   // scramble from rest
       else this.primeAirborneCraft(c);
       c.name = (d.name || 'Wingman ' + (i + 1));
-      c.role = bomberLoadout ? 'bomber' : 'fighter';
+      c.role = d.role === 'balloon' ? 'balloon' : (bomberLoadout ? 'bomber' : 'fighter');
       if (bomberLoadout && c.ai){
         c.ai.bombAltitude = attackAltitude;
         c.ai.altFloor = Math.max(c.ai.altFloor, attackAltitude - 110);
@@ -858,7 +861,7 @@ class Sim {
           const c = this.makeCraft(d, 1, pos, Math.PI, true, entry.skill ?? 0.5);
           this.primeAirborneCraft(c);
           c.name = (d.name || 'Bandit') + ' ' + (ei + 1);
-          c.role = isBomber ? 'bomber' : 'fighter';
+          c.role = d.role === 'balloon' ? 'balloon' : (isBomber ? 'bomber' : 'fighter');
           ei++;
         }
       });
@@ -879,6 +882,13 @@ class Sim {
     }
 
     this.world.player = this.player;
+
+    // Balloon replaces the keyboard fire shortcut with lift control; firing stays
+    // on the mouse so the new craft remains fully combat-capable.
+    if (this._helpEl && this.player && this.player.isBalloon){
+      this._helpEl.innerHTML = '<b>MOUSE</b> aim &amp; fly · <b>CLICK</b> fire · <b>SPACE</b> climb · <b>CTRL</b> descend · ' +
+        '<b>SHIFT</b> boost · <b>S</b> brake · <b>Z</b> engine on/off · <b>B</b> airbrake · <b>V</b> bombard view · <b>TAB</b>/<b>Q</b>/<b>E</b> weapon';
+    }
   }
 
   // build one flyable craft actor
@@ -887,11 +897,11 @@ class Sim {
     const group = buildAircraftMesh(design);
     group.position.copy(pos);
     group.rotation.y = yaw;
-    // A ship/carrier design flown as a craft renders at the shared SHIP_SCALE so it's the
-    // same size as the wingmen/enemy ships (NPC ships route to makeCarrier; only the PLAYER
-    // ever reaches makeCraft with a ship design). scaleMul also scales its hitbox, water
-    // clearance and chase-camera distance below.
-    const scaleMul = (design && (design.role === 'ship' || design.role === 'cruiser' || design.role === 'carrier' || design.isCarrier)) ? SHIP_SCALE : 1;
+    // Ships and balloons are intentionally larger than ordinary aircraft. Keep the role
+    // flags separate from scaleMul: size alone must never turn a balloon into a sea vessel.
+    const isShipRole = !!(design && (design.role === 'ship' || design.role === 'cruiser' || design.role === 'carrier' || design.isCarrier));
+    const isBalloon = !!(design && design.role === 'balloon');
+    const scaleMul = isShipRole ? SHIP_SCALE : (isBalloon ? BALLOON_SCALE : 1);
     if (scaleMul !== 1) group.scale.setScalar(scaleMul);
     this.scene.add(group);
 
@@ -920,8 +930,8 @@ class Sim {
     for (const w of allWeapons){
       const node = claimNode(w.partKey, w.mountIndex);
       // a piloted SHIP's deck torpedo tubes AUTO-launch (like its guns do via updateTurrets);
-      // an AIRCRAFT's torpedo stays a manual drop the pilot aims (scaleMul===1).
-      if (w.torpedo && scaleMul > 1) torpedoMounts.push({ w: { ...w, cool: 0 }, node });
+      // an AIRCRAFT/balloon torpedo stays a manual drop the pilot aims.
+      if (w.torpedo && isShipRole) torpedoMounts.push({ w: { ...w, cool: 0 }, node });
       else if (w.turret){ if (PARTS[w.partKey] && PARTS[w.partKey].autoTurret) mergeTurretNode(node); turrets.push({ w, node, aimYaw: 0, target: null }); }
       else if (w.type === 'melee'){            // a ram blade — contact damage, never in the weapon cycle
         const reach = (w.reach || 24) * scaleMul;
@@ -952,10 +962,11 @@ class Sim {
       hullCenter, hullHalf,                // oriented-box hitbox (local frame; see segHitsHull)
       fuelTankHitboxes,                    // exact vulnerable fuel-part volumes inside the broad hull
       team, isPlayer: false, isAI: !!isAI, isRemote: false,
-      scaleMul,                            // >1 for a ship/carrier hull flown as a craft
-      isShipCraft: scaleMul > 1,           // a piloted SHIP: floats on the sea, never an aircraft
-      name: design.name || 'Aircraft',
-      role: 'fighter',
+      scaleMul,                            // render/hitbox/camera scale for oversized craft
+      isShipCraft: isShipRole,             // a piloted SHIP: floats on the sea, never an aircraft
+      isBalloon,                           // buoyant aircraft: altitude hold + dedicated climb input
+      name: (design && design.name) || 'Aircraft',
+      role: (design && design.role) || 'fighter',
       pos: group.position,                 // alias (Vector3)
       // An engineless craft (a carrier, a powerless hull) NEVER gets gifted speed —
       // it can't move itself. A powered craft begins at cruise ONLY when it spawns
@@ -988,6 +999,7 @@ class Sim {
       dead: false,
       // input/ai intents
       wantGun: false, wantMissile: false, wantBomb: false, wantFlare: false,
+      balloonClimb: false, balloonDescend: false,
       aiDesired: null, aiWeaponIdx: -1,
       dropTanksGone: false,
       grounded: false,        // true only during a surface takeoff roll (startAirborne off)
@@ -1211,6 +1223,7 @@ class Sim {
     addEventListener('keyup', this._onKeyUp);
     addEventListener('mousemove', this._onMouseMove);
     addEventListener('mousedown', this._onMouseDown);
+    addEventListener('mouseup', this._onMouseUp);
     addEventListener('contextmenu', this._onContext);
     document.addEventListener('pointerlockchange', this._onPointerLock);
   }
@@ -1219,6 +1232,7 @@ class Sim {
     removeEventListener('keyup', this._onKeyUp);
     removeEventListener('mousemove', this._onMouseMove);
     removeEventListener('mousedown', this._onMouseDown);
+    removeEventListener('mouseup', this._onMouseUp);
     removeEventListener('contextmenu', this._onContext);
     document.removeEventListener('pointerlockchange', this._onPointerLock);
     if (this._onResize) removeEventListener('resize', this._onResize);
@@ -1228,7 +1242,7 @@ class Sim {
   onKeyDown(e){
     const k = e.key.toLowerCase();
     this.keys[k] = true;
-    if ((k === ' ' || k === 'space' || k === 'spacebar') && !e.repeat) this.firePulse = true;
+    if ((k === ' ' || k === 'space' || k === 'spacebar') && !e.repeat && !(this.player && this.player.isBalloon)) this.firePulse = true;
     if (k === 'tab'){ e.preventDefault(); this.cycleWeapon(1); }
     else if (k === 'q'){ this.cycleWeapon(-1); }
     else if (k === 'e'){ this.cycleWeapon(1); }
@@ -1275,7 +1289,12 @@ class Sim {
     this.aimPitch = clamp(this.aimPitch - e.movementY * sens * invert, -1.2, 1.2);  // mouse up = look up
   }
   onMouseDown(e){
-    if (!this.pointerLocked && e.button === 0){
+    if (e.button !== 0) return;
+    // Left click is always a weapon trigger. On the first click it also asks the
+    // browser to capture the mouse; firing still works if pointer lock is denied.
+    this.mouseFire = true;
+    this.firePulse = true;
+    if (!this.pointerLocked){
       const cv = $('gl');
       if (cv && cv.requestPointerLock){
         // requestPointerLock rejects (browser security) if called too soon after the
@@ -1286,7 +1305,11 @@ class Sim {
       }
     }
   }
-  onPointerLock(){ this.pointerLocked = !!document.pointerLockElement; }
+  onMouseUp(e){ if (e.button === 0) this.mouseFire = false; }
+  onPointerLock(){
+    this.pointerLocked = !!document.pointerLockElement;
+    if (!this.pointerLocked) this.mouseFire = false;
+  }
 
   cycleWeapon(dir){
     const p = this.player; if (!p || !p.weapons.length) return;
@@ -1394,10 +1417,13 @@ class Sim {
     p.flyDir = (p.flyDir || new THREE.Vector3()).set(Math.sin(this.aimYaw) * cp, Math.sin(this.aimPitch), Math.cos(this.aimYaw) * cp);
     p.aimDir = (p.aimDir || new THREE.Vector3()).copy(p.flyDir);   // guns fire along the reticle (see fireWeapon)
     p.manualRoll = (K['a'] ? 1 : 0) + (K['d'] ? -1 : 0);          // optional manual roll on top of auto-bank
+    const spaceHeld = !!(K[' '] || K['space'] || K['spacebar']);
+    p.balloonClimb = !!p.isBalloon && spaceHeld;
+    p.balloonDescend = !!p.isBalloon && !!K['control'] && !spaceHeld;
 
     // fire
     p.wantGun = false; p.wantMissile = false; p.wantBomb = false;
-    if (this.firePulse || K[' '] || K['space'] || K['spacebar']){
+    if (this.firePulse || this.mouseFire || (!p.isBalloon && spaceHeld)){
       const w = p.weapons[p.curWeapon];
       if (w){
         if (w.type === 'gun') p.wantGun = true;
@@ -1453,7 +1479,7 @@ class Sim {
 
     // stall: below vStall the control surfaces bite poorly and the nose drops
     const stallV = isFinite(s.vStall) ? s.vStall : 0;
-    c.stalled = speed < stallV * 0.92 && (c.pos.y - this.groundY) > 5;
+    c.stalled = !c.isBalloon && speed < stallV * 0.92 && (c.pos.y - this.groundY) > 5;
     let ctrlScale = 1;
     if (c.stalled){
       ctrlScale = clamp(speed / Math.max(1, stallV), 0.15, 0.6);   // mushy controls
@@ -1507,7 +1533,7 @@ class Sim {
     // capped so it can roughly balance weight at/above cruise. Below stall the
     // wing loses lift and the aircraft sinks.
     const upAxis = TMP2.set(0, 1, 0).applyQuaternion(c.group.quaternion);
-    if (s.liftArea > 0 && speed > 1){
+    if (!c.isBalloon && s.liftArea > 0 && speed > 1){
       // A coordinated turn needs more than 1g of TOTAL lift to keep its
       // vertical component equal to weight. Heavy AI bombers hold long, slow
       // reversals; the universal 1.15g cap made them bleed altitude until they
@@ -1521,8 +1547,15 @@ class Sim {
       acc.addScaledVector(upAxis, lift / mass);
     }
 
-    // gravity
-    acc.y -= 9.80665;
+    if (c.isBalloon){
+      // Neutral buoyancy: pitch/roll still steer the craft and engines still drive it
+      // forward, but it neither stalls nor slowly falls. Space/Ctrl command a smooth
+      // vertical-speed governor, so releasing both controls holds the current altitude.
+      acc.y = balloonVerticalAccel(v.y, c.balloonClimb, c.balloonDescend);
+    } else {
+      // gravity
+      acc.y -= 9.80665;
+    }
 
     // integrate velocity & position
     v.addScaledVector(acc, dt);
@@ -1578,8 +1611,17 @@ class Sim {
       const rest = surfY + GROUND_CLEAR * (c.scaleMul || 1);
       if (c.pos.y < rest) c.pos.y = rest;
       if (c.vel.y < 0) c.vel.y = 0;                 // surface holds it up
+      if (c.isBalloon){
+        if (c.balloonClimb){
+          c.grounded = false;
+          c.vel.y = Math.max(c.vel.y, 3);
+        } else {
+          c.group.position.copy(c.pos);
+          return;                                    // waits for Space, then rises vertically
+        }
+      }
       const stallV = isFinite(s.vStall) ? s.vStall : 60;
-      if (speed > stallV && c.vel.y > 0.5){
+      if (c.isBalloon || (speed > stallV && c.vel.y > 0.5)){
         c.grounded = false;                         // wheels/hull up — flying now
       } else {
         c.group.position.copy(c.pos);
@@ -3244,8 +3286,10 @@ class Sim {
       const alt = Math.round(p.pos.y - this.groundY);
       this.dom.spd.textContent = `SPD ${kmh} km/h`;
       this.dom.alt.textContent = `ALT ${alt} m`;
-      this.dom.thr.textContent = `THR ${Math.round(p.throttle * 100)}%${p.boost ? ' +AB' : ''}${p.engineOn ? '' : ' ⏻OFF'}${p.airbrakeOn ? ' ✖BRAKE' : ''}`;
-      this.dom.mach.textContent = p.stalled ? 'STALL' : (kmh > 1100 ? 'SUPERSONIC' : '');
+      this.dom.thr.textContent = `THR ${Math.round(p.throttle * 100)}%${p.boost ? ' +AB' : ''}${p.engineOn ? '' : ' ⏻OFF'}${p.airbrakeOn ? ' ✖BRAKE' : ''}${p.isBalloon ? ' · BALLOON' : ''}`;
+      this.dom.mach.textContent = p.isBalloon
+        ? (p.balloonClimb ? 'ASCENDING' : (p.balloonDescend ? 'DESCENDING' : 'BUOYANCY HOLD'))
+        : (p.stalled ? 'STALL' : (kmh > 1100 ? 'SUPERSONIC' : ''));
       this.dom.mach.className = 'v-mach' + (p.stalled ? ' hud-warn-tone' : '');
 
       // warnings

@@ -15,6 +15,13 @@ export const OVERHEAT_TEMP = 1100;  // °C structural failure temperature
 export const AMBIENT_TEMP = 15;     // °C
 export { G, RHO };
 
+// Neutral-buoyancy vertical governor used by Balloon-role craft. It is kept in
+// the shared physics module so editor/runtime tests exercise the exact same law.
+export function balloonVerticalAccel(verticalSpeed, climb, descend){
+  const target = climb ? 26 : (descend ? -18 : 0);
+  return clamp((target - verticalSpeed) * 3.2, -32, 32);
+}
+
 // effective footprint after a quarter-turn rotation about Y (swaps x/z)
 export function effSize(def, rot){
   const s = def.size || [1, 1, 1];
@@ -29,6 +36,7 @@ export function partCenter(p, def){
 // --- the big one ------------------------------------------------------------
 export function computeStats(design){
   const parts = (design && design.parts) || [];
+  const isBalloon = !!(design && design.role === 'balloon');
   const errors = [], warnings = [];
 
   let dryMass = 0, fuelCap = 0, cost = 0;
@@ -103,7 +111,7 @@ export function computeStats(design){
   const vMax      = totalDrag > 0 ? Math.sqrt((2 * thrust)      / (RHO * totalDrag)) : 0;
   const vMaxBoost = totalDrag > 0 ? Math.sqrt((2 * boostThrust) / (RHO * totalDrag)) : 0;
   // stall: minimum speed where wings can still hold up the weight
-  const vStall = liftArea > 0 ? Math.sqrt((2 * weight) / (RHO * liftArea * CL_MAX)) : Infinity;
+  const vStall = isBalloon ? 0 : (liftArea > 0 ? Math.sqrt((2 * weight) / (RHO * liftArea * CL_MAX)) : Infinity);
   const cruise = vMax * 0.7;
 
   const endurance = burnRate > 0 ? fuelCap / burnRate : Infinity;     // seconds at cruise throttle
@@ -139,7 +147,7 @@ export function computeStats(design){
   if (partCount === 0) errors.push('Empty airframe.');
   if (crew < 1) errors.push('No cockpit — add a command pod.');
   if (thrust <= 0) warnings.push('No engine — this aircraft cannot move under power.');
-  if (liftArea <= 0 && (thrust / weight) < 1) warnings.push('No wings & TWR<1 — it will fall out of the sky.');
+  if (!isBalloon && liftArea <= 0 && (thrust / weight) < 1) warnings.push('No wings & TWR<1 — it will fall out of the sky.');
   if (burnRate > 0 && fuelCap <= 0) errors.push('Engines but no fuel — add a fuel tank.');
   if (isFinite(vStall) && vStall > vMaxBoost && vMaxBoost > 0) warnings.push('Stall speed exceeds top speed — too heavy for its wings.');
   if (stability < -0.05) warnings.push('Centre of lift ahead of CoM — unstable, twitchy handling.');

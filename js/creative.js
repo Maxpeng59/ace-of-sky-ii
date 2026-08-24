@@ -237,7 +237,7 @@ function buildPlayerPanel(){
     const t = el('div'); t.style.cssText = 'font-weight:700;margin-bottom:6px;';
     t.textContent = 'Flying: ' + playerDesign.name;
     box.appendChild(t);
-    box.appendChild(statsGrid(st));
+    box.appendChild(statsGrid(st, playerDesign));
     if (!st.ok){
       const w = el('div', 'warns'); w.innerHTML = '<span class="err">⚠ This design has errors and may not fly well.</span>';
       box.appendChild(w);
@@ -510,7 +510,7 @@ function safeStatLine(d){
 }
 
 // a compact stats grid using the .stats design-system class
-function statsGrid(s){
+function statsGrid(s, design){
   const g = el('div', 'stats');
   const add = (k, v, cls) => {
     const kk = el('div', 'k', k); const vv = el('div', 'v' + (cls ? ' ' + cls : ''), v);
@@ -520,7 +520,8 @@ function statsGrid(s){
   add('Mass', (s.mass / 1000).toFixed(2) + ' t');
   add('TWR', s.twr.toFixed(2), s.twr < 0.8 ? 'warn' : 'good');
   add('Top speed', kmh(s.vMaxBoost || s.vMax));
-  add('Stall', kmh(s.vStall), 'warn');
+  if (design && design.role === 'balloon') add('Buoyancy', 'Neutral · SPACE climb', 'good');
+  else add('Stall', kmh(s.vStall), 'warn');
   add('Durability', Math.round(s.durability) + ' HP');
   add('Agility', Math.round((s.agility.pitch + s.agility.roll + s.agility.yaw) / 3) + '°/s');
   add('Endurance', fmtTime(s.endurance));

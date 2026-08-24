@@ -419,7 +419,7 @@ function buildInfo(info){
 
   const roleLbl = el('label', 'field', 'Role');
   const roleSel = el('select');
-  for (const r of ['fighter', 'interceptor', 'strike', 'bomber', 'heavy', 'drone', 'carrier', 'ship', 'cruiser']){
+  for (const r of ['fighter', 'interceptor', 'strike', 'bomber', 'heavy', 'drone', 'balloon', 'carrier', 'ship', 'cruiser']){
     const o = el('option', '', r); o.value = r; if (S.design.role === r) o.selected = true; roleSel.appendChild(o);
   }
   roleSel.onchange = () => { S.design.role = roleSel.value; emitChange(); };
@@ -1078,13 +1078,15 @@ function renderStats(st){
 
   // a surface vessel doesn't fly: show its NAVAL cruise (what it actually does on the water), not the
   // four-figure aerodynamic vMax. Boost/stall are aircraft-only, so drop them for ships.
-  const isVessel = S.design && (S.design.role === 'ship' || S.design.role === 'carrier');
+  const isVessel = S.design && (S.design.role === 'ship' || S.design.role === 'carrier' || S.design.role === 'cruiser');
+  const isBalloon = S.design && S.design.role === 'balloon';
   if (isVessel){
     kv(g, 'Naval speed', kmh(navalCruise(st)) + ' km/h', cls3(kmh(navalCruise(st)), 250, 120));
   } else {
     kv(g, 'Top speed', kmh(st.vMax) + ' km/h', cls3(kmh(st.vMax), 700, 400));
     kv(g, 'Boost top', kmh(st.vMaxBoost) + ' km/h', cls3(kmh(st.vMaxBoost), 850, 500));
-    kv(g, 'Stall speed', isFinite(st.vStall) ? kmh(st.vStall) + ' km/h' : '—',
+    if (isBalloon) kv(g, 'Buoyancy', 'Neutral · SPACE climb', 'good');
+    else kv(g, 'Stall speed', isFinite(st.vStall) ? kmh(st.vStall) + ' km/h' : '—',
       isFinite(st.vStall) ? cls3(kmh(st.vStall), 220, 320, false) : 'bad');
   }
 

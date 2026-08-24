@@ -429,7 +429,7 @@ function buildLibrarySection(){
   toolbar.appendChild(mkBtn('Restore stock', 'ghost small', () => {
     confirmDialog({
       title: 'Restore stock blueprints?',
-      body: 'Adds any missing factory designs (Falcon, Vanguard, Fortress, Wasp, Goliath) to your library. Your own designs are kept.',
+      body: 'Adds any missing factory designs, including the Skywhale Balloon, to your library. Your own designs are kept.',
       okLabel: 'Restore',
     }, () => {
       let added = 0;
@@ -558,7 +558,7 @@ export const Menu = {
     // ---- footer credit / quit hint ----
     const foot = el('div', 'row');
     foot.style.justifyContent = 'space-between'; foot.style.marginTop = '6px'; foot.style.opacity = '.7';
-    foot.appendChild(el('div', 'faint small mono', 'forward = +Z · WASD throttle/roll · mouse aim · Shift boost · Space fire'));
+    foot.appendChild(el('div', 'faint small mono', 'forward = +Z · WASD throttle/roll · mouse aim · Shift boost · Space fire / balloon climb'));
     foot.appendChild(el('div', 'faint small mono', 'Ace of Sky II'));
     content.appendChild(foot);
 
