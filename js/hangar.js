@@ -1085,7 +1085,7 @@ function renderStats(st){
   } else {
     kv(g, 'Top speed', kmh(st.vMax) + ' km/h', cls3(kmh(st.vMax), 700, 400));
     kv(g, 'Boost top', kmh(st.vMaxBoost) + ' km/h', cls3(kmh(st.vMaxBoost), 850, 500));
-    if (isBalloon) kv(g, 'Buoyancy', 'Neutral · SPACE climb', 'good');
+    if (isBalloon) kv(g, 'Buoyancy', 'Neutral · Q climb / E descend', 'good');
     else kv(g, 'Stall speed', isFinite(st.vStall) ? kmh(st.vStall) + ' km/h' : '—',
       isFinite(st.vStall) ? cls3(kmh(st.vStall), 220, 320, false) : 'bad');
   }

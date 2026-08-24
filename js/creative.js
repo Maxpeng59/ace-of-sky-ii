@@ -520,7 +520,7 @@ function statsGrid(s, design){
   add('Mass', (s.mass / 1000).toFixed(2) + ' t');
   add('TWR', s.twr.toFixed(2), s.twr < 0.8 ? 'warn' : 'good');
   add('Top speed', kmh(s.vMaxBoost || s.vMax));
-  if (design && design.role === 'balloon') add('Buoyancy', 'Neutral · SPACE climb', 'good');
+  if (design && design.role === 'balloon') add('Buoyancy', 'Neutral · Q climb / E descend', 'good');
   else add('Stall', kmh(s.vStall), 'warn');
   add('Durability', Math.round(s.durability) + ' HP');
   add('Agility', Math.round((s.agility.pitch + s.agility.roll + s.agility.yaw) / 3) + '°/s');

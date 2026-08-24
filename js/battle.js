@@ -542,6 +542,7 @@ class Sim {
     this.aimYaw = 0; this.aimPitch = 0;   // free look/aim direction (radians)
     this.pointerLocked = false;
     this.mouseFire = false;
+    this.bombPulse = false;
     this.assistOn = false;                // P: auto-aim guns at the lead point on lock
 
     // camera state
@@ -883,11 +884,11 @@ class Sim {
 
     this.world.player = this.player;
 
-    // Balloon replaces the keyboard fire shortcut with lift control; firing stays
-    // on the mouse so the new craft remains fully combat-capable.
+    // Balloon has dedicated lift keys and a direct bomb trigger; firing guns stays
+    // on the mouse so the craft can bomb and defend itself without weapon juggling.
     if (this._helpEl && this.player && this.player.isBalloon){
-      this._helpEl.innerHTML = '<b>MOUSE</b> aim &amp; fly · <b>CLICK</b> fire · <b>SPACE</b> climb · <b>CTRL</b> descend · ' +
-        '<b>SHIFT</b> boost · <b>S</b> brake · <b>Z</b> engine on/off · <b>B</b> airbrake · <b>V</b> bombard view · <b>TAB</b>/<b>Q</b>/<b>E</b> weapon';
+      this._helpEl.innerHTML = '<b>MOUSE</b> aim &amp; fly · <b>CLICK</b> fire · <b>Q</b> climb · <b>E</b> descend · <b>SPACE</b> bomb · ' +
+        '<b>SHIFT</b> boost · <b>S</b> brake · <b>Z</b> engine on/off · <b>B</b> airbrake · <b>V</b> bombard view · <b>TAB</b> weapon';
     }
   }
 
@@ -1001,6 +1002,7 @@ class Sim {
       // input/ai intents
       wantGun: false, wantMissile: false, wantBomb: false, wantFlare: false,
       balloonClimb: false, balloonDescend: false,
+      fireOverrideIdx: -1,                 // Balloon Space can fire a bomb without changing the selected gun
       aiDesired: null, aiWeaponIdx: -1,
       dropTanksGone: false,
       grounded: false,        // true only during a surface takeoff roll (startAirborne off)
@@ -1243,10 +1245,13 @@ class Sim {
   onKeyDown(e){
     const k = e.key.toLowerCase();
     this.keys[k] = true;
-    if ((k === ' ' || k === 'space' || k === 'spacebar') && !e.repeat && !(this.player && this.player.isBalloon)) this.firePulse = true;
+    if ((k === ' ' || k === 'space' || k === 'spacebar') && !e.repeat){
+      if (this.player && this.player.isBalloon) this.bombPulse = true;
+      else this.firePulse = true;
+    }
     if (k === 'tab'){ e.preventDefault(); this.cycleWeapon(1); }
-    else if (k === 'q'){ this.cycleWeapon(-1); }
-    else if (k === 'e'){ this.cycleWeapon(1); }
+    else if (k === 'q' && !(this.player && this.player.isBalloon)){ this.cycleWeapon(-1); }
+    else if (k === 'e' && !(this.player && this.player.isBalloon)){ this.cycleWeapon(1); }
     else if (k === 'z'){ e.preventDefault(); this.toggleEngine(); }
     else if (k === 'b'){ this.toggleAirbrake(); }
     else if (k === 'v' && !e.repeat){ this.toggleBombView(); }
@@ -1420,12 +1425,22 @@ class Sim {
     p.aimDir = (p.aimDir || new THREE.Vector3()).copy(p.flyDir);   // guns fire along the reticle (see fireWeapon)
     p.manualRoll = (K['a'] ? 1 : 0) + (K['d'] ? -1 : 0);          // optional manual roll on top of auto-bank
     const spaceHeld = !!(K[' '] || K['space'] || K['spacebar']);
-    p.balloonClimb = !!p.isBalloon && spaceHeld;
-    p.balloonDescend = !!p.isBalloon && !!K['control'] && !spaceHeld;
+    p.balloonClimb = !!p.isBalloon && !!K['q'];
+    p.balloonDescend = !!p.isBalloon && !!K['e'] && !p.balloonClimb;
+    p.fireOverrideIdx = -1;
 
     // fire
     p.wantGun = false; p.wantMissile = false; p.wantBomb = false;
-    if (this.firePulse || this.mouseFire || (!p.isBalloon && spaceHeld)){
+    if (p.isBalloon && this.bombPulse){
+      const bombIdx = p.weapons.findIndex(w => w.type === 'bomb' && weaponMembers(w).every(member =>
+        member.ammo > 0 && member.reloading <= 0 && member.cool <= 0));
+      if (bombIdx >= 0){
+        p.wantBomb = true;
+        p.fireOverrideIdx = bombIdx;
+      } else if (!p.weapons.some(w => w.type === 'bomb')){
+        this.flashMsg('NO BOMBS FITTED', 'warn', 0.7);
+      }
+    } else if (this.firePulse || this.mouseFire || (!p.isBalloon && spaceHeld)){
       const w = p.weapons[p.curWeapon];
       if (w){
         if (w.type === 'gun') p.wantGun = true;
@@ -1435,6 +1450,7 @@ class Sim {
       }
     }
     this.firePulse = false;
+    this.bombPulse = false;
     p.aiWeaponIdx = p.curWeapon;
   }
 
@@ -1683,7 +1699,9 @@ class Sim {
       }
     }
 
-    const idx = c.isPlayer ? c.curWeapon : (c.aiWeaponIdx >= 0 ? c.aiWeaponIdx : c.curWeapon);
+    const idx = c.isPlayer
+      ? (c.fireOverrideIdx >= 0 ? c.fireOverrideIdx : c.curWeapon)
+      : (c.aiWeaponIdx >= 0 ? c.aiWeaponIdx : c.curWeapon);
     const w = c.weapons[idx];
     if (!w) return;
 
@@ -1803,6 +1821,7 @@ class Sim {
     } else if (w.type === 'bomb'){
       this.spawnBomb(c, muzzle, w);
       sfx('ui', 0.2);
+      if (c.isPlayer) this.flashMsg('BOMB AWAY', 'good', 0.7);
     }
   }
 
