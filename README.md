@@ -19,6 +19,7 @@
 - **V** — toggle the top-down bombardment view and bomb impact/blast prediction
 - In the hangar: **click** to place a part, **Shift+drag** to turn the view, **wheel** to zoom, **R / T / Y** to rotate a part.
 - In the hangar: select a non-missile weapon and press **C** to combine every identical unpaired weapon into one simultaneous-fire group. Groups can contain any number of weapons and appear in flight as `Weapon ×N`; press **C** again to separate the group.
+- The Hangar Library supports persistent folders and plane search. New or imported planes go into the open folder; deleting a folder keeps every aircraft and moves it to **Unfiled**.
 - Fuel tanks are lightweight but volatile: they contribute reduced durability, and a direct hit through a tank deals **2× damage** to the aircraft. Jettisoned drop tanks no longer remain vulnerable targets.
 
 ## Run it locally

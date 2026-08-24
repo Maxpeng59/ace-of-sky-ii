@@ -10,6 +10,7 @@
 import * as THREE from 'three';
 import {
   State, load, save, libGet, libSave, libDelete, libDuplicate,
+  folderCreate, folderRename, folderDelete, libMoveToFolder,
   newDesign, STOCK_DESIGNS, resetSave, statsOf, bus,
 } from './core.js';
 import * as core from './core.js';
@@ -79,6 +80,23 @@ function confirmDialog({ title, body, okLabel = 'Confirm', danger = false }, onO
     row.appendChild(mkBtn('Cancel', 'ghost', close));
     row.appendChild(mkBtn(okLabel, danger ? 'danger' : 'accent', () => { close(); onOk(); }));
     box.appendChild(row);
+  });
+}
+
+function textPromptDialog({ title, label, value = '', okLabel = 'Save' }, onSubmit){
+  modal((box, close) => {
+    box.appendChild(el('h2', '', title));
+    const field = el('label', 'field');
+    field.textContent = label;
+    const input = el('input'); input.type = 'text'; input.value = value; input.maxLength = 48;
+    field.appendChild(input); box.appendChild(field);
+    const submit = () => { if (onSubmit(input.value) !== false) close(); };
+    input.addEventListener('keydown', e => { if (e.key === 'Enter'){ e.preventDefault(); submit(); } });
+    const row = el('div', 'row'); row.style.marginTop = '18px'; row.style.justifyContent = 'flex-end';
+    row.appendChild(mkBtn('Cancel', 'ghost', close));
+    row.appendChild(mkBtn(okLabel, 'accent', submit));
+    box.appendChild(row);
+    setTimeout(() => { input.focus(); input.select(); }, 30);
   });
 }
 
@@ -159,7 +177,7 @@ function stopBackdrop(){
 // ---------------------------------------------------------------------------
 function roleLabel(d){ return (d.role || 'fighter'); }
 
-function buildLibraryCard(d, rerender){
+function buildLibraryCard(d, rerender, folders){
   const card = el('div', 'card');
   card.style.display = 'flex'; card.style.flexDirection = 'column'; card.style.gap = '8px';
 
@@ -191,6 +209,22 @@ function buildLibraryCard(d, rerender){
   cost.style.color = 'var(--gold)';
   cost.textContent = s ? fmtCr(s.cost) : '—';
   card.appendChild(cost);
+
+  const folderField = el('label', 'field');
+  folderField.textContent = 'Folder';
+  const folderSelect = el('select');
+  folderSelect.setAttribute('aria-label', 'Folder for ' + (d.name || 'Aircraft'));
+  const unfiled = el('option', '', 'Unfiled'); unfiled.value = ''; folderSelect.appendChild(unfiled);
+  for (const folder of folders){
+    const option = el('option', '', folder.name); option.value = folder.id; folderSelect.appendChild(option);
+  }
+  folderSelect.value = d.folderId || '';
+  folderSelect.addEventListener('change', () => {
+    const folder = folders.find(f => f.id === folderSelect.value);
+    if (libMoveToFolder(d.id, folderSelect.value)) toast('Moved to ' + (folder ? '“' + folder.name + '”' : 'Unfiled'), 'good');
+  });
+  folderField.appendChild(folderSelect);
+  card.appendChild(folderField);
 
   if (s && (!s.ok || (s.errors && s.errors.length))){
     const warn = el('div', 'warns');
@@ -237,8 +271,9 @@ function editDesign(id, rerender){
 }
 
 // New aircraft → straight into the hangar; save into library on exit.
-function newAircraft(){
+function newAircraft(folderId = ''){
   const d = newDesign();
+  if (folderId) d.folderId = folderId;
   Hangar.open({
     design: d,
     title: 'NEW AIRCRAFT',
@@ -278,11 +313,12 @@ function exportDesign(d){
 }
 
 // Import → parse code via core, push to library.
-function importAircraft(rerender){
+function importAircraft(rerender, folderId = ''){
   importDialog((code) => {
     if (!code || !code.trim()){ return; }
     const d = core.importCode(code);
     if (!d){ toast('Invalid design code', 'bad'); return; }
+    if (folderId) d.folderId = folderId;
     libSave(d);
     toast('Imported “' + d.name + '”', 'good');
     if (rerender) rerender();
@@ -405,26 +441,95 @@ function buildLibrarySection(){
   panel.appendChild(head);
 
   const toolbar = el('div', 'row');
-  toolbar.style.marginBottom = '12px';
+  toolbar.style.marginBottom = '10px';
+  const folderBar = el('div', 'pill-row');
+  folderBar.style.marginBottom = '10px';
+  const findRow = el('div', 'row');
+  findRow.style.marginBottom = '12px';
+  const search = el('input'); search.type = 'text'; search.placeholder = 'Search planes…';
+  search.setAttribute('aria-label', 'Search planes'); search.style.flex = '1'; search.style.minWidth = '180px';
+  findRow.appendChild(search);
   const grid = el('div', 'grid');
   grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(260px, 1fr))';
 
+  let activeFolder = 'all';
+  let query = '';
+
+  const askCreateFolder = () => textPromptDialog({ title: 'Create folder', label: 'Folder name', okLabel: 'Create' }, raw => {
+    const name = raw.trim();
+    if (!name){ toast('Enter a folder name', 'warn'); return false; }
+    const folder = folderCreate(name);
+    if (!folder){ toast('That folder already exists', 'warn'); return false; }
+    activeFolder = folder.id;
+    toast('Created “' + folder.name + '”', 'good');
+    rerender();
+    return true;
+  });
+
   const rerender = () => {
+    clear(folderBar);
     clear(grid);
     const lib = State.library || [];
-    count.textContent = lib.length + (lib.length === 1 ? ' design' : ' designs');
-    if (!lib.length){
+    const folders = State.designFolders || [];
+    if (activeFolder !== 'all' && activeFolder !== 'unfiled' && !folders.some(f => f.id === activeFolder)) activeFolder = 'unfiled';
+    const folderCount = id => lib.filter(d => id === 'unfiled' ? !d.folderId : d.folderId === id).length;
+    const addFolderPill = (id, label, amount) => {
+      const pill = el('button', 'pill' + (activeFolder === id ? ' sel' : ''), label + ' (' + amount + ')');
+      clickable(pill, () => { activeFolder = id; rerender(); });
+      folderBar.appendChild(pill);
+    };
+    addFolderPill('all', 'All', lib.length);
+    addFolderPill('unfiled', 'Unfiled', folderCount('unfiled'));
+    for (const folder of folders) addFolderPill(folder.id, folder.name, folderCount(folder.id));
+
+    const selectedFolder = folders.find(f => f.id === activeFolder);
+    if (selectedFolder){
+      folderBar.appendChild(mkBtn('Rename', 'ghost small', () => {
+        textPromptDialog({ title: 'Rename folder', label: 'Folder name', value: selectedFolder.name, okLabel: 'Rename' }, raw => {
+          const name = raw.trim();
+          if (!name){ toast('Enter a folder name', 'warn'); return false; }
+          if (!folderRename(selectedFolder.id, name)){ toast('That folder already exists', 'warn'); return false; }
+          toast('Folder renamed', 'good'); rerender(); return true;
+        });
+      }));
+      folderBar.appendChild(mkBtn('Delete folder', 'danger small', () => {
+        confirmDialog({
+          title: 'Delete folder “' + selectedFolder.name + '”?',
+          body: 'The folder will be removed. Its aircraft will stay safe and move to Unfiled.',
+          okLabel: 'Delete folder', danger: true,
+        }, () => {
+          activeFolder = 'unfiled';
+          folderDelete(selectedFolder.id);
+          toast('Folder deleted · aircraft moved to Unfiled', 'warn');
+          rerender();
+        });
+      }));
+    }
+
+    const needle = query.trim().toLowerCase();
+    const visible = lib.filter(d => {
+      if (activeFolder === 'unfiled' && d.folderId) return false;
+      if (activeFolder !== 'all' && activeFolder !== 'unfiled' && d.folderId !== activeFolder) return false;
+      return !needle || [d.name, d.author, d.role].some(v => String(v || '').toLowerCase().includes(needle));
+    }).slice().sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+    count.textContent = visible.length === lib.length
+      ? lib.length + (lib.length === 1 ? ' design' : ' designs')
+      : visible.length + ' shown · ' + lib.length + ' total';
+    if (!visible.length){
       const empty = el('div', 'muted');
       empty.style.gridColumn = '1 / -1'; empty.style.padding = '24px'; empty.style.textAlign = 'center';
-      empty.textContent = 'Your library is empty. Build a new aircraft or import a code to get started.';
+      empty.textContent = !lib.length
+        ? 'Your library is empty. Build a new aircraft or import a code to get started.'
+        : (needle ? 'No planes match your search in this folder.' : 'No aircraft in this folder yet.');
       grid.appendChild(empty);
     } else {
-      for (const d of lib) grid.appendChild(buildLibraryCard(d, rerender));
+      for (const d of visible) grid.appendChild(buildLibraryCard(d, rerender, folders));
     }
   };
 
-  toolbar.appendChild(mkBtn('+ New aircraft', 'accent', () => newAircraft()));
-  toolbar.appendChild(mkBtn('Import code', '', () => importAircraft(rerender)));
+  toolbar.appendChild(mkBtn('+ New aircraft', 'accent', () => newAircraft(activeFolder !== 'all' && activeFolder !== 'unfiled' ? activeFolder : '')));
+  toolbar.appendChild(mkBtn('+ Folder', '', askCreateFolder));
+  toolbar.appendChild(mkBtn('Import code', '', () => importAircraft(rerender, activeFolder !== 'all' && activeFolder !== 'unfiled' ? activeFolder : '')));
   // restore the factory blueprints into the library
   toolbar.appendChild(mkBtn('Restore stock', 'ghost small', () => {
     confirmDialog({
@@ -446,7 +551,10 @@ function buildLibrarySection(){
   }));
 
   panel.appendChild(toolbar);
+  panel.appendChild(folderBar);
+  panel.appendChild(findRow);
   panel.appendChild(grid);
+  search.addEventListener('input', () => { query = search.value; rerender(); });
   rerender();
 
   // re-render if the library changes externally while menu visible

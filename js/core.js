@@ -54,6 +54,7 @@ export function importCode(str){
 export const State = {
   money: 18000,                 // campaign credits
   library: [],                  // AircraftDesign[]  (player's saved designs)
+  designFolders: [],            // [{id, name}] local library organisation
   settings: { sfx: true, music: true, invertY: false, masterVol: 0.8 },
   campaign: {
     started: false,
@@ -71,7 +72,8 @@ export const State = {
 
 export function save(){
   try { localStorage.setItem(SAVE_KEY, JSON.stringify({
-    money: State.money, library: State.library, settings: State.settings, campaign: State.campaign, pvp: State.pvp,
+    money: State.money, library: State.library, designFolders: State.designFolders,
+    settings: State.settings, campaign: State.campaign, pvp: State.pvp,
   })); bus.emit('saved'); } catch (e){ console.warn('save failed', e); }
 }
 export function load(){
@@ -79,6 +81,16 @@ export function load(){
     const raw = localStorage.getItem(SAVE_KEY);
     if (raw){ const s = JSON.parse(raw); Object.assign(State, s); }
   } catch (e){ console.warn('load failed', e); }
+  if (!Array.isArray(State.designFolders)) State.designFolders = [];
+  State.designFolders = State.designFolders
+    .filter(f => f && typeof f.id === 'string' && typeof f.name === 'string' && f.name.trim())
+    .map(f => ({ id: f.id, name: f.name.trim() }));
+  const validFolderIds = new Set(State.designFolders.map(f => f.id));
+  if (Array.isArray(State.library)){
+    for (const d of State.library){
+      if (d && d.folderId && !validFolderIds.has(d.folderId)) delete d.folderId;
+    }
+  }
   if (!State.library || State.library.length === 0) State.library = STOCK_DESIGNS.map(d => cloneDesign(d, ''));
   else {
     // Upgrade the original unarmed factory Skywhale in existing saves to the
@@ -114,6 +126,36 @@ export function libSave(d){
 }
 export function libDelete(id){ State.library = State.library.filter(d => d.id !== id); save(); bus.emit('library'); }
 export function libDuplicate(id){ const d = libGet(id); if (!d) return null; const c = cloneDesign(d); State.library.push(c); save(); bus.emit('library'); return c; }
+export function folderCreate(name){
+  name = String(name || '').trim();
+  if (!name || State.designFolders.some(f => f.name.toLowerCase() === name.toLowerCase())) return null;
+  const folder = { id: 'f' + uid().slice(1), name };
+  State.designFolders.push(folder);
+  save(); bus.emit('library');
+  return folder;
+}
+export function folderRename(id, name){
+  const folder = State.designFolders.find(f => f.id === id);
+  name = String(name || '').trim();
+  if (!folder || !name || State.designFolders.some(f => f.id !== id && f.name.toLowerCase() === name.toLowerCase())) return false;
+  folder.name = name;
+  save(); bus.emit('library');
+  return true;
+}
+export function folderDelete(id){
+  if (!State.designFolders.some(f => f.id === id)) return false;
+  State.designFolders = State.designFolders.filter(f => f.id !== id);
+  for (const d of State.library){ if (d.folderId === id) delete d.folderId; }
+  save(); bus.emit('library');
+  return true;
+}
+export function libMoveToFolder(designId, folderId){
+  const d = libGet(designId);
+  if (!d || (folderId && !State.designFolders.some(f => f.id === folderId))) return false;
+  if (folderId) d.folderId = folderId; else delete d.folderId;
+  save(); bus.emit('library');
+  return true;
+}
 
 // ============================================================================
 //  STOCK AIRCRAFT  — valid part layouts that actually fly (opponents + starters)
