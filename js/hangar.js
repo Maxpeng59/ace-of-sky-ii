@@ -257,13 +257,6 @@ function buildDOM(){
     S.els.budgetLbl = lbl; S.els.budgetFill = fill; S.els.budgetBox = bb;
   }
 
-  // hint line
-  const hint = el('div', 'hangar-hint');
-  hint.innerHTML = '<b>0.5 m snap</b> aligns odd/even parts · <b>Shift+drag</b> = turn around · Wheel = zoom · Right/Middle drag = pan · ' +
-    '<b>R</b> rotate part · <b>C</b> combine identical weapons · <b>Del</b>/right-click remove · <b>Ctrl+Z</b> undo · click a part then <b>drag the X/Y/Z arrows</b> to move it';
-  stage.appendChild(hint);
-  S.els.hint = hint;
-
   root.appendChild(stage);
 
   // ---- INFO --------------------------------------------------------------
@@ -874,31 +867,38 @@ function combineSelectedWeapon(){
     toast('Missiles cannot be combined', 'bad'); return;
   }
 
-  if (part.fireGroup){
-    const group = part.fireGroup;
+  // Gather every compatible physical weapon, including weapons that already
+  // belong to another group. This lets a fire group grow without a count cap
+  // when more guns are added later, and also merges split groups in one press.
+  const groupMembers = [];
+  for (let i = 0; i < S.design.parts.length; i++){
+    const candidate = S.design.parts[i];
+    const candidateDef = PARTS[candidate.key];
+    if (!candidateDef || candidateDef.autoTurret || candidateDef.weapon !== def.weapon) continue;
+    groupMembers.push(candidate);
+  }
+  if (groupMembers.length < 2){ toast('Add a second identical ' + weapon.name, 'warn'); return; }
+
+  const currentGroup = part.fireGroup || '';
+  const hasOutsideMember = currentGroup && groupMembers.some(p => p.fireGroup !== currentGroup);
+  if (currentGroup && !hasOutsideMember){
     pushUndo();
-    for (const p of S.design.parts){ if (p.fireGroup === group) delete p.fireGroup; }
+    for (const p of groupMembers) delete p.fireGroup;
     rebuildAircraft(); refreshStats(); renderSelInspector(); emitChange();
     toast(weapon.name + ' group separated', '');
     return;
   }
 
-  const groupMembers = [];
-  for (let i = 0; i < S.design.parts.length; i++){
-    const candidate = S.design.parts[i];
-    const candidateDef = PARTS[candidate.key];
-    if (!candidateDef || candidateDef.autoTurret || candidate.fireGroup || candidateDef.weapon !== def.weapon) continue;
-    groupMembers.push(candidate);
+  let group = currentGroup || (groupMembers.find(p => p.fireGroup) || {}).fireGroup;
+  if (!group){
+    const used = new Set(S.design.parts.map(p => p.fireGroup).filter(Boolean));
+    let n = 1; while (used.has('group' + n)) n++;
+    group = 'group' + n;
   }
-  if (groupMembers.length < 2){ toast('Add a second identical unpaired ' + weapon.name, 'warn'); return; }
-
-  const used = new Set(S.design.parts.map(p => p.fireGroup).filter(Boolean));
-  let n = 1; while (used.has('group' + n)) n++;
-  const group = 'group' + n;
   pushUndo();
   for (const member of groupMembers) member.fireGroup = group;
   rebuildAircraft(); refreshStats(); renderSelInspector(); emitChange();
-  toast(weapon.name + ' ×' + groupMembers.length + ' — simultaneous fire', 'good');
+  toast(weapon.name + ' ×' + groupMembers.length + ' — unlimited simultaneous group', 'good');
 }
 
 function deleteSelected(){
@@ -1304,8 +1304,8 @@ function showModal(title, fill){
 function installInput(){
   const stage = S.els.stage;
   const onDown = (e) => {
-    // ignore clicks that originate on UI overlays (toolbar/hint/budget)
-    if (e.target.closest('.hangar-toolbar, .hangar-hint, .budgetbar')) return;
+    // ignore clicks that originate on UI overlays (toolbar/budget)
+    if (e.target.closest('.hangar-toolbar, .budgetbar')) return;
     stage.focus?.();
     S.lastMx = e.clientX; S.lastMy = e.clientY;
     setMouse(e);

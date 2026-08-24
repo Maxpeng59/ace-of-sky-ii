@@ -1339,7 +1339,7 @@ class Sim {
     this.readPlayerInput(dt);
 
     // 2. AI for non-player, non-remote craft. Any bomb-carrying aircraft uses
-    //    bomber doctrine when a hostile carrier exists (including balloons),
+    //    bomber doctrine when a hostile surface vessel exists (including player ships),
     //    then falls back to fighter logic when there is nothing to bomb.
     updateSquads(this.world, dt);
     for (const c of this.craft){

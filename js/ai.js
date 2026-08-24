@@ -126,14 +126,23 @@ export function pickTarget(craft, world){
   return best;
 }
 
-// pick a carrier the AI (a bomber) should attack
-function pickCarrierTarget(craft, world){
-  let best = null, bestD = Infinity;
-  for (const c of world.carriers){
-    if (!c.alive || c.team === craft.team) continue;
-    const d = dist(craft.pos, c.pos);
-    if (d < bestD){ bestD = d; best = c; }
+// Pick any hostile surface vessel for a bombing run. NPC carriers/warships live
+// in world.carriers, but a player-controlled ship is a craft with isShipCraft;
+// searching only the first collection made enemy bombers ignore player ships.
+function pickSurfaceTarget(craft, world){
+  let best = null, bestScore = Infinity;
+  const preferred = craft.ai && craft.ai.bombTarget;
+  const consider = (target) => {
+    if (!target || !target.alive || target.team === craft.team) return;
+    let score = dist(craft.pos, target.pos);
+    if (target === preferred) score *= 0.65;       // commit instead of swapping targets every frame
+    if (score < bestScore){ bestScore = score; best = target; }
+  };
+  for (const vessel of (world.carriers || [])) consider(vessel);
+  for (const vessel of (world.craft || [])){
+    if (vessel !== craft && vessel.isShipCraft) consider(vessel);
   }
+  if (craft.ai) craft.ai.bombTarget = best;
   return best;
 }
 
@@ -141,7 +150,7 @@ function pickCarrierTarget(craft, world){
 // AHEAD of a surface target for its carried momentum to put the bomb on deck.
 // The old "within 240 m of the carrier" gate waited until almost overhead, so
 // a jet-speed bomber's ordnance sailed hundreds of metres beyond the target.
-function bombImpactSolution(craft, world, carrier, weapon){
+function bombImpactSolution(craft, world, surfaceTarget, weapon){
   let x = craft.pos.x, y = craft.pos.y, z = craft.pos.z;
   let vx = craft.vel.x, vy = craft.vel.y, vz = craft.vel.z;
   const step = 0.12;
@@ -154,12 +163,14 @@ function bombImpactSolution(craft, world, carrier, weapon){
       ? world.surfaceHeight(x, z)
       : (world.groundY || 0);
     if (y <= surface + 1){
-      const tvx = carrier.vel?.x || 0, tvz = carrier.vel?.z || 0;
-      const tx = carrier.pos.x + tvx * t, tz = carrier.pos.z + tvz * t;
+      const tvx = surfaceTarget.vel?.x || 0, tvz = surfaceTarget.vel?.z || 0;
+      const tx = surfaceTarget.pos.x + tvx * t, tz = surfaceTarget.pos.z + tvz * t;
       const miss = Math.hypot(x - tx, z - tz);
-      // Let a direct hull strike or a useful splash hit trigger the release,
-      // without treating the carrier's long broad-phase radius as unlimited aim tolerance.
-      const hull = clamp(carrier.hitR || 70, 35, 180);
+      // Let a direct hull strike or a useful splash hit trigger the release.
+      // NPC vessels have hitR; flyable ships expose their oriented hull extents.
+      const hullExtent = surfaceTarget.hitR || (surfaceTarget.hullHalf
+        ? Math.max(surfaceTarget.hullHalf.x, surfaceTarget.hullHalf.z) : 70);
+      const hull = clamp(hullExtent, 35, 180);
       const splash = Math.min(160, weapon.splash || 0) * 0.65;
       return { miss, tolerance: hull + splash, impactX: x, impactZ: z, targetX: tx, targetZ: tz, time: t };
     }
@@ -431,17 +442,17 @@ function applyFlank(ai, craft, tgt, range, lead){
 }
 
 // ---------------------------------------------------------------------------
-//  BOMBER BRAIN — heads for the nearest enemy carrier, lines up a run, and
+//  BOMBER BRAIN — heads for the nearest hostile surface vessel, lines up a run, and
 //  pickles bombs/heavy ordnance on the way over; falls back to dogfight AI if
-//  there's no carrier to hit.
+//  there's no surface target to hit.
 // ---------------------------------------------------------------------------
 export function updateBomber(craft, world, dt){
   const ai = craft.ai;
   if (!ai) return;
   craft.wantGun = false; craft.wantMissile = false; craft.wantBomb = false; craft.wantFlare = false;
 
-  const carrier = pickCarrierTarget(craft, world);
-  if (!carrier){ updateAI(craft, world, dt); return; }   // nothing to bomb → fight
+  const carrier = pickSurfaceTarget(craft, world);
+  if (!carrier){ updateAI(craft, world, dt); return; }   // nothing on the surface to bomb → fight
 
   ai.react -= dt; ai.panic = Math.max(0, ai.panic - dt * 0.6);
 
