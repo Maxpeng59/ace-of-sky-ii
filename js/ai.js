@@ -482,7 +482,11 @@ export function updateBomber(craft, world, dt){
   if (ai.bombEgressT <= 0 && range < 1700 && runDot < -0.18) ai.bombEgressT = 8;
   if (ai.bombEgressT > 0){
     const egressAlt = (ai.bombAltitude || 280) + 210;
-    ai.desired.set(_fwd.x, clamp((egressAlt - alt) / 260, 0.16, 0.48), _fwd.z).normalize();
+    // Converge on the egress altitude from either side. The old positive
+    // minimum forced another eight-second climb even when already above this
+    // height, so every bombing circuit ratcheted the formation farther into
+    // the sky instead of bringing it back down for the next pass.
+    ai.desired.set(_fwd.x, clamp((egressAlt - alt) / 260, -0.22, 0.48), _fwd.z).normalize();
     if (incoming && incoming.kind === 'ir' && craft.flares > 0 && Math.random() < 0.08) craft.wantFlare = true;
     craft.throttle = 1;
     craft.boost = craft.fuel > 0;

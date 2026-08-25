@@ -25,6 +25,15 @@ export function balloonVerticalAccel(verticalSpeed, climb, descend, aiVertical =
   return clamp((target - verticalSpeed) * 3.2, -32, 32);
 }
 
+// Lift load needed to hold altitude at the current bank, capped by the
+// airframe/autopilot limit. A level aircraft needs exactly 1 g; using the
+// maximum load all the time makes every fast aircraft climb forever even when
+// its nose and requested flight path are level.
+export function trimmedLiftLoad(upwardComponent, maxLoad = 1.15){
+  if (upwardComponent <= 0) return maxLoad;
+  return clamp(1 / Math.max(0.01, upwardComponent), 1, maxLoad);
+}
+
 // effective footprint after a quarter-turn rotation about Y (swaps x/z)
 export function effSize(def, rot){
   const s = def.size || [1, 1, 1];

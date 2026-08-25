@@ -33,7 +33,7 @@
 // ============================================================================
 import * as THREE from 'three';
 import { clamp, lerp, dampF, $, el, show, hide, sfx, toast, fmtNum, mulberry32 } from './util.js';
-import { computeStats, dragForce, thermoStep, partCenter, navalCruise, balloonVerticalAccel, AMBIENT_TEMP, OVERHEAT_TEMP, RHO } from './physics.js';
+import { computeStats, dragForce, thermoStep, partCenter, navalCruise, balloonVerticalAccel, trimmedLiftLoad, AMBIENT_TEMP, OVERHEAT_TEMP, RHO } from './physics.js';
 import { PARTS } from './parts.js';
 import { State, importCode, exportCode, stockGet } from './core.js';
 import { setScene, onFrame, resetView, getRenderer } from './engine.js';
@@ -1537,7 +1537,8 @@ class Sim {
       // reversals; the universal 1.15g cap made them bleed altitude until they
       // hit the sea even at a shallow bank. Give their autopilot a modest
       // 1.55g allowance while leaving player/fighter handling unchanged.
-      const liftG = (!c.isPlayer && c.role === 'bomber') ? 1.55 : 1.15;
+      const maxLiftG = (!c.isPlayer && c.role === 'bomber') ? 1.55 : 1.15;
+      const liftG = trimmedLiftLoad(upAxis.y, maxLiftG);
       const liftCap = mass * 9.80665 * liftG;
       let lift = 0.5 * RHO * s.liftArea * speed * speed * 1.1;
       if (speed < stallV) lift *= clamp(speed / Math.max(1, stallV), 0, 1) * 0.5;  // stall drop-off
