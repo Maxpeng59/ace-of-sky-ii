@@ -42,6 +42,7 @@ import {
 } from './prediction.js';
 import { initAI, updateAI, updateBomber, updateCarrierPD, pickTarget, updateSquads } from './ai.js';
 import { Music } from './music.js';
+import { buildDamageZoneHitboxes, hitDamageZone as intersectDamageZone } from './damage-zones.js';
 
 // ---------------------------------------------------------------------------
 //  Environment presets — sky gradient, sun, fog and surface look per env.
@@ -61,7 +62,6 @@ const MAX_BANK = 1.15;            // ≈66° — the bank the auto-coordinator h
 const BOMBER_MAX_BANK = 0.48;     // ≈28° — heavy bombers retain enough vertical lift in long reversals
 const GROUND_CLEAR = 8;           // belly clearance a craft rests at on the surface (must exceed the +2 crash line)
 const REPAIR_DELAY = 4;           // seconds after a hit before onboard repair bays resume mending
-const FUEL_TANK_HIT_MULTIPLIER = 2; // a round through volatile tankage hurts the airframe twice as much
 const SHIP_SCALE = 2;             // the PLAYER's piloted ship (a ship/carrier design flown via makeCraft) renders at
                                   // this scale; its hitbox, water clearance and chase camera track it via scaleMul.
 const BALLOON_SCALE = 1.65;        // balloons are deliberately larger than ordinary aircraft in flight
@@ -104,8 +104,6 @@ const QTMP = new THREE.Quaternion();
 // scratch for the auto-turret traverse/aim math (kept separate from the flight TMPs)
 const _TV = new THREE.Vector3(), _TV2 = new THREE.Vector3(), _TV3 = new THREE.Vector3();
 const _TQ = new THREE.Quaternion(), _TQ2 = new THREE.Quaternion();
-const _FTA = new THREE.Vector3(), _FTB = new THREE.Vector3(), _FTLA = new THREE.Vector3(), _FTLB = new THREE.Vector3();
-const _FTQ = new THREE.Quaternion();
 const _ZAXIS = new THREE.Vector3(0, 0, 1);
 const _HD = new THREE.Vector3();   // scratch: fleet heading for formation station-keeping
 
@@ -383,31 +381,6 @@ function buildAircraftMesh(design){
     if (k && PARTS[k] && PARTS[k].autoTurret) node.traverse(o => { if (o.isMesh) o.castShadow = false; });
   }
   return group;
-}
-
-// Physical sub-hitboxes for volatile fuel parts. The main hull remains the broad
-// collision target; these oriented boxes only decide whether a confirmed hit also
-// pierced tankage and should receive the fuel-hit damage multiplier.
-function buildFuelTankHitboxes(design, centroidOff, scale = 1){
-  const boxes = [];
-  const off = centroidOff || { x: 0, y: 0, z: 0 };
-  const E = Math.PI / 4;
-  for (const p of (design && design.parts) || []){
-    const def = PARTS[p.key];
-    if (!def || def.category !== 'fuel') continue;
-    const c = partCenter(p, def);
-    const rot = new THREE.Quaternion().setFromEuler(new THREE.Euler(
-      -((p.rx || 0) * 2 + (p.hp || 0)) * E,
-      -((p.rot || 0) * 2 + (p.hy || 0)) * E,
-      -((p.rz || 0) * 2 + (p.hr || 0)) * E, 'YXZ'));
-    boxes.push({
-      center: new THREE.Vector3((c.x - off.x) * scale, (c.y - off.y) * scale, (c.z - off.z) * scale),
-      half: new THREE.Vector3((def.size?.[0] || 1) * 0.5 * scale, (def.size?.[1] || 1) * 0.5 * scale, (def.size?.[2] || 1) * 0.5 * scale),
-      invRotation: rot.invert(),
-      jettison: !!def.jettison,
-    });
-  }
-  return boxes;
 }
 
 // A C-linked group keeps every physical weapon's independent muzzle, ammo,
@@ -956,12 +929,12 @@ class Sim {
       Math.max(_bb.size.y / 2 * scaleMul + 0.8, 2),
       Math.max(_bb.size.z / 2 * scaleMul + 0.8, 2));
 
-    const fuelTankHitboxes = buildFuelTankHitboxes(design, _co, scaleMul);
+    const damageZoneHitboxes = buildDamageZoneHitboxes(design, _co, scaleMul);
     const fwd = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
     const craft = {
       design, stats, group,
       hullCenter, hullHalf,                // oriented-box hitbox (local frame; see segHitsHull)
-      fuelTankHitboxes,                    // exact vulnerable fuel-part volumes inside the broad hull
+      damageZoneHitboxes,                  // exact cockpit/fuel/engine volumes inside the broad hull
       team, isPlayer: false, isAI: !!isAI, isRemote: false,
       scaleMul,                            // render/hitbox/camera scale for oversized craft
       isShipCraft: isShipRole,             // a piloted SHIP: floats on the sea, never an aircraft
@@ -1077,7 +1050,7 @@ class Sim {
     // that "catches" rounds metres beside and above the deck.
     const hbb = designStats && designStats.bbox ? designStats.bbox.size : null;
     const hitR = hbb ? Math.max(hbb.x, hbb.z) * 0.55 * CARRIER_SCALE : (design ? 60 : 150);
-    let hullCenter, hullHalf, fuelTankHitboxes = [];
+    let hullCenter, hullHalf, damageZoneHitboxes = [];
     if (designStats && designStats.bbox){
       const _bb = designStats.bbox, _co = mesh.userData.centroidOff || { x: 0, y: 0, z: 0 };
       hullCenter = new THREE.Vector3(
@@ -1088,7 +1061,7 @@ class Sim {
         Math.max(_bb.size.x / 2 * CARRIER_SCALE + 2, 4),
         Math.max(_bb.size.y / 2 * CARRIER_SCALE + 2, 4),
         Math.max(_bb.size.z / 2 * CARRIER_SCALE + 2, 4));
-      fuelTankHitboxes = buildFuelTankHitboxes(design, _co, CARRIER_SCALE);
+      damageZoneHitboxes = buildDamageZoneHitboxes(design, _co, CARRIER_SCALE);
     } else {
       // default slab carrier: hull 70×~34×300 around a deck at y≈6
       hullCenter = new THREE.Vector3(0, 4, 0);
@@ -1108,7 +1081,7 @@ class Sim {
     const carrier = {
       design, mesh, team, hitR,
       hullCenter, hullHalf,           // oriented-box hitbox (local frame; see segHitsHull)
-      fuelTankHitboxes,
+      damageZoneHitboxes,
       pos: mesh.position,
       vel: isShip ? new THREE.Vector3() : new THREE.Vector3((team === 1 ? -1 : 1) * 6, 0, 0),  // ships steer under pursuit AI; carriers steam slowly
       hp, maxHp: hp,
@@ -1183,6 +1156,13 @@ class Sim {
     const msg = el('div', 'hud-msg');
     hud.appendChild(msg);
 
+    // FPS-style hit confirmation. Damage events pulse this small four-stroke
+    // cross instead of printing HIT / component names over the centre view.
+    const hitmarker = el('div', 'hud-hitmarker');
+    hitmarker.setAttribute('aria-hidden', 'true');
+    hitmarker.innerHTML = '<i></i><i></i><i></i><i></i>';
+    hud.appendChild(hitmarker);
+
     // controls legend — fades out a few seconds into the sortie
     const help = el('div', 'hud-help');
     help.innerHTML = '<b>MOUSE</b> aim &amp; fly (nose chases the reticle) · <b>SHIFT</b> boost · <b>S</b> brake · <b>Z</b> engine on/off · ' +
@@ -1200,7 +1180,7 @@ class Sim {
       weapon: bl.querySelector('.v-weapon'),
       spd: tl.querySelector('.v-spd'), alt: tl.querySelector('.v-alt'), thr: tl.querySelector('.v-thr'), mach: tl.querySelector('.v-mach'),
       obj: tc.querySelector('.v-obj'), objsub: tc.querySelector('.v-objsub'),
-      msg,
+      msg, hitmarker,
     };
     this.dom.obj.textContent = objectiveLabel(this.objective);
   }
@@ -1950,17 +1930,17 @@ class Sim {
       // orient trail along travel
       if (b.trail){ b.trail.position.copy(b.pos); }
       // collision: segment vs craft/carrier spheres
-      let hit = null, fuelTankHit = false;
+      let hit = null, damageZone = null;
       for (const o of this.craft){
         if (!o.alive || o.team === b.team) continue;
         if (this.segHitsCraft(prev, b.pos, o)){
-          hit = o; fuelTankHit = this.segHitsFuelTank(prev, b.pos, o); break;
+          hit = o; damageZone = this.hitDamageZone(prev, b.pos, o); break;
         }
       }
       if (!hit) for (const cc of this.carriers){
         if (!cc.alive || cc.team === b.team) continue;
         if (this.segHitsCarrier(prev, b.pos, cc)){
-          hit = cc; fuelTankHit = this.segHitsFuelTank(prev, b.pos, cc); break;
+          hit = cc; damageZone = this.hitDamageZone(prev, b.pos, cc); break;
         }
       }
       // ground
@@ -1969,8 +1949,11 @@ class Sim {
 
       if (hit || b.life <= 0){
         if (hit && hit !== 'ground'){
-          this.damage(hit, b.dmg * (fuelTankHit ? FUEL_TANK_HIT_MULTIPLIER : 1), b.owner, true, fuelTankHit ? 'FUEL TANK HIT' : 'HIT');
-          this.spawnSpark(b.pos, fuelTankHit ? 0xffb020 : (b.team === 0 ? 0x39ff88 : 0xff8844));
+          this.damage(hit, b.dmg * (damageZone ? damageZone.multiplier : 1), b.owner, true);
+          const zoneSpark = damageZone && damageZone.category === 'command' ? 0xff4d6d
+            : damageZone && damageZone.category === 'fuel' ? 0xffb020
+            : damageZone && damageZone.category === 'engine' ? 0x6fd8ff : null;
+          this.spawnSpark(b.pos, zoneSpark || (b.team === 0 ? 0x39ff88 : 0xff8844));
           sfx('hit', hit === this.player ? 0.3 : 0.05);
           if (b.splash) this.splashDamage(b.pos, b.splash, b.dmg * 0.4, b.owner, b.team);
         } else if (hit === 'ground'){
@@ -2021,20 +2004,20 @@ class Sim {
       m.pos.addScaledVector(m.vel, dt);
 
       // detonation checks
-      let det = false, at = m.pos, directTarget = null, fuelTankHit = false;
+      let det = false, at = m.pos, directTarget = null, damageZone = null;
       if (m.armTime <= 0){
         for (const o of this.craft){
           if (!o.alive || o.team === m.team) continue;
           if (this.segHitsCraft(prev, m.pos, o, 6)){
             det = true; at = o.pos; directTarget = o;
-            fuelTankHit = this.segHitsFuelTank(prev, m.pos, o, 0.8); break;
+            damageZone = this.hitDamageZone(prev, m.pos, o, 0.8); break;
           }
         }
         if (!det) for (const cc of this.carriers){
           if (!cc.alive || cc.team === m.team) continue;
           if (this.segHitsCarrier(prev, m.pos, cc, 10)){
             det = true; at = cc.pos; directTarget = cc;
-            fuelTankHit = this.segHitsFuelTank(prev, m.pos, cc, 0.8); break;
+            damageZone = this.hitDamageZone(prev, m.pos, cc, 0.8); break;
           }
         }
       }
@@ -2044,7 +2027,7 @@ class Sim {
       if (det || m.life <= 0){
         if (det){
           this.spawnExplosion(at, m.splash > 40 ? 1.5 : 1);
-          this.splashDamage(at, m.splash, m.dmg, m.owner, m.team, directTarget, fuelTankHit ? FUEL_TANK_HIT_MULTIPLIER : 1);
+          this.splashDamage(at, m.splash, m.dmg, m.owner, m.team, directTarget, damageZone ? damageZone.multiplier : 1);
           sfx('boom', 0.4);
         }
         this.removeMissile(i);
@@ -2115,20 +2098,20 @@ class Sim {
       t.mesh.rotation.y = Math.atan2(t.vel.x, t.vel.z);
 
       // detonate on a surface vessel (never on the open water — it lives there). Armed after launch.
-      let det = false, at = t.pos, directTarget = null, fuelTankHit = false;
+      let det = false, at = t.pos, directTarget = null, damageZone = null;
       if (t.arm <= 0){
         for (const cc of this.carriers){
           if (!cc.alive || cc.team === t.team) continue;
           if (this.segHitsCarrier(prev, t.pos, cc, 6)){
             det = true; at = cc.pos; directTarget = cc;
-            fuelTankHit = this.segHitsFuelTank(prev, t.pos, cc, 1); break;
+            damageZone = this.hitDamageZone(prev, t.pos, cc, 1); break;
           }
         }
         if (!det) for (const o of this.craft){
           if (!o.alive || o.team === t.team || !this.isSurface(o)) continue;
           if (this.segHitsCraft(prev, t.pos, o, 5)){
             det = true; at = o.pos; directTarget = o;
-            fuelTankHit = this.segHitsFuelTank(prev, t.pos, o, 1); break;
+            damageZone = this.hitDamageZone(prev, t.pos, o, 1); break;
           }
         }
       }
@@ -2136,7 +2119,7 @@ class Sim {
         if (det){
           const surf = this.surfaceHeight(at.x, at.z);
           this.spawnExplosion(TMP3.set(at.x, surf + 2, at.z), 1.7);
-          this.splashDamage(at, t.splash, t.dmg, t.owner, t.team, directTarget, fuelTankHit ? FUEL_TANK_HIT_MULTIPLIER : 1);
+          this.splashDamage(at, t.splash, t.dmg, t.owner, t.team, directTarget, damageZone ? damageZone.multiplier : 1);
           sfx('boom', 0.5);
         }
         this.removeTorpedo(i);
@@ -2287,35 +2270,14 @@ class Sim {
     return distSegPoint(a, b, o.pos) <= r;
   }
 
-  segHitsFuelTank(a, b, o, pad = 0){
-    const boxes = o && o.fuelTankHitboxes;
-    if (!boxes || !boxes.length) return false;
-    const q = _FTQ.copy((o.group || o.mesh).quaternion).invert();
-    const la = _FTA.copy(a).sub(o.pos).applyQuaternion(q);
-    const lb = _FTB.copy(b).sub(o.pos).applyQuaternion(q);
-    for (const box of boxes){
-      if (box.jettison && o.dropTanksGone) continue;
-      const pa = _FTLA.copy(la).sub(box.center).applyQuaternion(box.invRotation);
-      const pb = _FTLB.copy(lb).sub(box.center).applyQuaternion(box.invRotation);
-      let t0 = 0, t1 = 1, hit = true;
-      for (const ax of ['x', 'y', 'z']){
-        const p0 = pa[ax], d = pb[ax] - p0, e = box.half[ax] + pad;
-        if (Math.abs(d) < 1e-9){ if (p0 < -e || p0 > e){ hit = false; break; } continue; }
-        let u = (-e - p0) / d, v = (e - p0) / d;
-        if (u > v){ const w = u; u = v; v = w; }
-        if (u > t0) t0 = u;
-        if (v < t1) t1 = v;
-        if (t0 > t1){ hit = false; break; }
-      }
-      if (hit) return true;
-    }
-    return false;
+  hitDamageZone(a, b, o, pad = 0){
+    return intersectDamageZone(a, b, o, pad);
   }
 
   // ---------------------------------------------------------------------
   //  DAMAGE / SPLASH / KILL
   // ---------------------------------------------------------------------
-  damage(o, amount, attacker, allowArmor, hitLabel = 'HIT'){
+  damage(o, amount, attacker, allowArmor){
     if (!o.alive) return;
     let dmg = amount;
     if (allowArmor && o.armor > 0){
@@ -2329,11 +2291,9 @@ class Sim {
     }
     o.hp -= dmg;
     if (o.repairRate) o.repairCool = REPAIR_DELAY;     // taking a hit suspends self-repair
+    if (attacker && attacker.isPlayer && attacker.team !== o.team) this.showHitMarker();
     if (o.isPlayer){
       this.shake = Math.min(0.8, this.shake + Math.min(0.4, dmg / 120));
-      this.flashMsg(hitLabel, 'bad');
-    } else if (hitLabel === 'FUEL TANK HIT' && attacker && attacker.isPlayer){
-      this.flashMsg('FUEL TANK HIT', 'good');
     }
     if (o.hp <= 0){
       if (o.isCarrier) this.killCarrier(o, attacker);
@@ -2347,16 +2307,16 @@ class Sim {
       if (!o.alive || o.team === team) continue;
       const d = Math.hypot(o.pos.x - center.x, o.pos.y - center.y, o.pos.z - center.z);
       if (d < radius){
-        const fuelHit = o === directTarget && directMultiplier > 1;
-        this.damage(o, dmg * (1 - d / radius) * (fuelHit ? directMultiplier : 1), attacker, true, fuelHit ? 'FUEL TANK HIT' : 'HIT');
+        const directHit = o === directTarget && directMultiplier > 1;
+        this.damage(o, dmg * (1 - d / radius) * (directHit ? directMultiplier : 1), attacker, true);
       }
     }
     for (const cc of this.carriers){
       if (!cc.alive || cc.team === team) continue;
       const d = Math.hypot(cc.pos.x - center.x, cc.pos.y - center.y, cc.pos.z - center.z);
       if (d < radius + 60){
-        const fuelHit = cc === directTarget && directMultiplier > 1;
-        this.damage(cc, dmg * (1 - d / (radius + 60)) * 1.5 * (fuelHit ? directMultiplier : 1), attacker, false, fuelHit ? 'FUEL TANK HIT' : 'HIT');
+        const directHit = cc === directTarget && directMultiplier > 1;
+        this.damage(cc, dmg * (1 - d / (radius + 60)) * 1.5 * (directHit ? directMultiplier : 1), attacker, false);
       }
     }
   }
@@ -2437,7 +2397,7 @@ class Sim {
     if (!tanks.length){ if (c.isPlayer) this.flashMsg('NO DROP TANKS', 'warn'); return; }
     for (const t of tanks){ t.visible = false; }
     c.dropTanksGone = true;
-    c.fuelTankHitboxes = (c.fuelTankHitboxes || []).filter(box => !box.jettison);
+    c.damageZoneHitboxes = (c.damageZoneHitboxes || []).filter(box => !box.jettison);
     // shed the drag/mass of drop tanks by recomputing a leaner stat profile
     const lean = { ...c.design, parts: c.design.parts.filter(p => !(PARTS[p.key] && PARTS[p.key].jettison)) };
     const ns = computeStats(lean);
@@ -2726,7 +2686,6 @@ class Sim {
         this.spawnSpark(o.pos, c.team === 0 ? 0x39ff88 : 0xff8844);
         this.spawnExplosion(o.pos, 0.7);
         sfx('hit', o === this.player ? 0.4 : 0.12);
-        if (c.isPlayer) this.flashMsg('RAM!', 'good');
         m.cool = m.gap;
         return;
       }
@@ -3170,6 +3129,16 @@ class Sim {
     this._msgT = setTimeout(() => this.dom.msg.classList.remove('show'), secs * 1000);
   }
 
+  showHitMarker(){
+    const marker = this.dom && this.dom.hitmarker;
+    if (!marker) return;
+    marker.classList.remove('show');
+    void marker.offsetWidth; // restart the short animation for rapid-fire hits
+    marker.classList.add('show');
+    clearTimeout(this._hitMarkerT);
+    this._hitMarkerT = setTimeout(() => marker.classList.remove('show'), 180);
+  }
+
   renderHUD(dt){
     const ctx = this.hudCtx; if (!ctx) return;
     const W = this.W, H = this.H;
@@ -3399,6 +3368,7 @@ class Sim {
     if (this.unsubFrame) this.unsubFrame();
     this.unbindInput();
     clearTimeout(this._msgT);
+    clearTimeout(this._hitMarkerT);
     clearTimeout(this._helpT1); clearTimeout(this._helpT2);   // don't leak the controls-legend timers on fast restart
     // dispose scene contents (but keep the cross-battle shared geometry cache)
     const shared = new Set([Sim.bulletGeom, Sim.trailGeom, Sim.missileGeom, Sim.missileNoseGeom, Sim.missileFinGeom, Sim.flameGeom, Sim.bombGeom, Sim.bombNoseGeom, Sim.bombFinGeom, Sim.boomGeom, Sim.flareGeom2, Sim.torpedoGeom, Sim.torpedoNoseGeom, Sim.wakeGeom].filter(Boolean));
