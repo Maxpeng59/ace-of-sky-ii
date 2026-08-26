@@ -43,6 +43,7 @@ import {
 import { initAI, updateAI, updateBomber, updateCarrierPD, pickTarget, updateSquads } from './ai.js';
 import { Music } from './music.js';
 import { buildDamageZoneHitboxes, hitDamageZone as intersectDamageZone } from './damage-zones.js';
+import { normalizeDeployment, deploymentYaw, formationPosition } from './deployment.js';
 
 // ---------------------------------------------------------------------------
 //  Environment presets — sky gradient, sun, fog and surface look per env.
@@ -736,19 +737,32 @@ class Sim {
   // ---------------------------------------------------------------------
   spawnAll(){
     const cfg = this.cfg;
-    // player (team 0) at origin, facing +Z.
+    // Creative supplies a deployment map. Other modes intentionally retain
+    // their established starting locations and formations.
+    const customDeployment = !!cfg.deployment;
+    const deployment = customDeployment
+      ? normalizeDeployment(cfg.deployment)
+      : { ally: { x: 0, z: -600 }, enemy: { x: 0, z: 1400 } };
+    const allyOrigin = deployment.ally, enemyOrigin = deployment.enemy;
+    const allyYaw = deploymentYaw(allyOrigin, enemyOrigin);
+    const enemyYaw = deploymentYaw(enemyOrigin, allyOrigin);
+    const slot = (origin, yaw, lateral, forward, y = 0) => {
+      const v = formationPosition(origin, yaw, lateral, forward, y);
+      return new THREE.Vector3(v.x, v.y, v.z);
+    };
+    // Player starts at the allied map marker, facing the enemy marker.
     // "Start airborne" (default on) puts you at altitude already moving; turning it
     // off begins you resting on the surface (a runway on land, the water on a sea
     // map) so you take off under your own power — pull up once you have flying speed.
     const airborne = cfg.startAirborne !== false;
     let playerPos;
     if (airborne){
-      playerPos = new THREE.Vector3(0, 360, -600);
+      playerPos = slot(allyOrigin, allyYaw, 0, 0, 360);
     } else {
-      const surfY = this.surfaceHeight(0, -600);
-      playerPos = new THREE.Vector3(0, surfY + GROUND_CLEAR, -600);
+      const surfY = this.surfaceHeight(allyOrigin.x, allyOrigin.z);
+      playerPos = slot(allyOrigin, allyYaw, 0, 0, surfY + GROUND_CLEAR);
     }
-    this.player = this.makeCraft(cfg.player, 0, playerPos, 0, false);
+    this.player = this.makeCraft(cfg.player, 0, playerPos, allyYaw, false);
     this.player.isPlayer = true;
     this.player.name = (cfg.player && cfg.player.name) || 'You';
     if (this.player.isShipCraft){
@@ -778,14 +792,16 @@ class Sim {
       if (!d) return;
       if (d.isCarrier || d.role === 'carrier' || d.role === 'ship' || d.role === 'cruiser'){
         const k = carrierAllies++;
-        this.makeCarrier(d, 0, new THREE.Vector3(260 + k * 150, 0, -1500 - k * 220));
+        const shipPos = customDeployment
+          ? slot(allyOrigin, allyYaw, 260 + k * 170, -720 - k * 180)
+          : new THREE.Vector3(260 + k * 150, 0, -1500 - k * 220);
+        this.makeCarrier(d, 0, shipPos, customDeployment ? allyYaw : null);
         return;
       }
       const w = i - carrierAllies;                 // flying-wingman index (skip any carrier allies)
       const side = (w % 2) ? 1 : -1;
       const rank = Math.floor(w / 2);              // pairs bracket you: 0,0,1,1,…
       const lateral = side * (70 + rank * 55);     // successive pairs spread farther left/right
-      const formationZ = -600;                     // exactly abreast of the player
       // Heavy bomber groups need vertical separation as well as lateral
       // spacing. Seven Fortresses converging at one altitude amplify every
       // evasive bank and can lose most of the formation to the sea.
@@ -793,12 +809,13 @@ class Sim {
       const attackAltitude = bomberLoadout ? 360 + rank * 36 + (side > 0 ? 18 : 0) : 360;
       let pos;
       if (airborne){
-        pos = new THREE.Vector3(lateral, attackAltitude, formationZ);
+        pos = slot(allyOrigin, allyYaw, lateral, 0, attackAltitude);
       } else {
-        pos = new THREE.Vector3(lateral, this.surfaceHeight(lateral, formationZ) + GROUND_CLEAR, formationZ);
+        const groundSlot = slot(allyOrigin, allyYaw, lateral, 0);
+        pos = slot(allyOrigin, allyYaw, lateral, 0, this.surfaceHeight(groundSlot.x, groundSlot.z) + GROUND_CLEAR);
       }
       const allySkill = d.skill ?? d._skill ?? 0.5;
-      const c = this.makeCraft(d, 0, pos, 0, true, allySkill);
+      const c = this.makeCraft(d, 0, pos, allyYaw, true, allySkill);
       if (!airborne){ c.grounded = true; c.vel.set(0, 0, 0); }   // scramble from rest
       else this.primeAirborneCraft(c);
       c.name = (d.name || 'Wingman ' + (i + 1));
@@ -822,7 +839,10 @@ class Sim {
         if (!d) return;
         if (d.isCarrier || d.role === 'carrier' || d.role === 'ship' || d.role === 'cruiser'){
           for (let k = 0; k < (entry.count || 1); k++){
-            this.makeCarrier(d, 1, new THREE.Vector3(-300 + ecn * 220, 0, 2200 + ecn * 350));
+            const shipPos = customDeployment
+              ? slot(enemyOrigin, enemyYaw, -260 + ecn * 220, -720 - ecn * 180)
+              : new THREE.Vector3(-300 + ecn * 220, 0, 2200 + ecn * 350);
+            this.makeCarrier(d, 1, shipPos, customDeployment ? enemyYaw : null);
             ecn++;
           }
           return;
@@ -830,10 +850,17 @@ class Sim {
         const st = this.stats(d);
         const isBomber = st.weapons.some(w => w.type === 'bomb');
         for (let k = 0; k < (entry.count || 1); k++){
-          const ang = (ei / 6) * Math.PI * 2;
-          const R = 1400 + (ei % 3) * 260;
-          const pos = new THREE.Vector3(Math.sin(ang) * R, 320 + (ei % 4) * 70, 1400 + Math.cos(ang) * R * 0.4);
-          const c = this.makeCraft(d, 1, pos, Math.PI, true, entry.skill ?? 0.5);
+          let pos;
+          if (customDeployment){
+            const side = ei === 0 ? 0 : (ei % 2 ? -1 : 1);
+            const rank = ei === 0 ? 0 : Math.ceil(ei / 2);
+            pos = slot(enemyOrigin, enemyYaw, side * (100 + rank * 85), -rank * 45, 320 + (ei % 4) * 70);
+          } else {
+            const ang = (ei / 6) * Math.PI * 2;
+            const R = 1400 + (ei % 3) * 260;
+            pos = new THREE.Vector3(Math.sin(ang) * R, 320 + (ei % 4) * 70, 1400 + Math.cos(ang) * R * 0.4);
+          }
+          const c = this.makeCraft(d, 1, pos, enemyYaw, true, entry.skill ?? 0.5);
           this.primeAirborneCraft(c);
           c.name = (d.name || 'Bandit') + ' ' + (ei + 1);
           c.role = d.role === 'balloon' ? 'balloon' : (isBomber ? 'bomber' : 'fighter');
@@ -844,16 +871,16 @@ class Sim {
 
     // carriers
     if (cfg.carrier){
-      this.makeCarrier(cfg.carrier, 0, new THREE.Vector3(0, 0, -2200));
+      this.makeCarrier(cfg.carrier, 0, customDeployment ? slot(allyOrigin, allyYaw, 0, -1000) : new THREE.Vector3(0, 0, -2200), customDeployment ? allyYaw : null);
     }
     if (cfg.enemyCarrier){
-      this.makeCarrier(cfg.enemyCarrier, 1, new THREE.Vector3(0, 0, 3000));
+      this.makeCarrier(cfg.enemyCarrier, 1, customDeployment ? slot(enemyOrigin, enemyYaw, 0, -1000) : new THREE.Vector3(0, 0, 3000), customDeployment ? enemyYaw : null);
     } else if (this.objective.type === 'sink'){
       // sink objective with no design → spawn a default enemy carrier
-      this.makeCarrier(null, 1, new THREE.Vector3(0, 0, 3000));
+      this.makeCarrier(null, 1, customDeployment ? slot(enemyOrigin, enemyYaw, 0, -1000) : new THREE.Vector3(0, 0, 3000), customDeployment ? enemyYaw : null);
     }
     if (this.objective.type === 'escort' && !cfg.carrier){
-      this.makeCarrier(null, 0, new THREE.Vector3(0, 0, -2200));
+      this.makeCarrier(null, 0, customDeployment ? slot(allyOrigin, allyYaw, 0, -1000) : new THREE.Vector3(0, 0, -2200), customDeployment ? allyYaw : null);
     }
 
     this.world.player = this.player;
@@ -1001,7 +1028,7 @@ class Sim {
     craft.speed = launchSpeed;
   }
 
-  makeCarrier(design, team, pos){
+  makeCarrier(design, team, pos, deploymentHeading = null){
     const isSea = this.env.sea;
     const isCruiser = !!(design && design.role === 'cruiser');  // a lone fast attacker — no formation, charges at flank
     const isShip = isCruiser || !!(design && design.role === 'ship');   // a ship/cruiser actively hunts targets
@@ -1077,7 +1104,9 @@ class Sim {
     // heading0 points the bow at the enemy's side so a ship starts a charge already lined up.
     const turnRate = isCruiser ? SHIP_TURN_CRUISER : SHIP_TURN_RATE * clamp(SHIP_TURN_REF_R / hitR, 0.4, 1.4);
     // a ship starts bow-on to the enemy's side (charges along Z); a slab carrier starts along its X lane
-    const heading0 = isShip ? (team === 1 ? Math.PI : 0) : Math.atan2((team === 1 ? -1 : 1) * 6, 0);
+    const heading0 = Number.isFinite(deploymentHeading)
+      ? deploymentHeading
+      : (isShip ? (team === 1 ? Math.PI : 0) : Math.atan2((team === 1 ? -1 : 1) * 6, 0));
     mesh.rotation.y = heading0;
     const carrier = {
       design, mesh, team, hitR,

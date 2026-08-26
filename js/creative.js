@@ -20,6 +20,9 @@ import { $, el, clear, show, hide, toast, sfx, clamp, fmtTime } from './util.js'
 import { Hangar } from './hangar.js';
 import { Battle } from './battle.js';
 import { Menu } from './menu.js';
+import {
+  DEPLOY_LIMIT, DEFAULT_DEPLOYMENT, clampDeploymentPoint, deploymentDistance,
+} from './deployment.js';
 
 // ----------------------------------------------------------------------------
 //  Persistent setup model — survives leaving/returning to the screen so a player
@@ -44,6 +47,11 @@ const setup = {
   aceMode: false,            // every enemy at max skill
   startAirborne: true,
   showcaseLog: false,
+  deployment: {
+    ally: { ...DEFAULT_DEPLOYMENT.ally },
+    enemy: { ...DEFAULT_DEPLOYMENT.enemy },
+  },
+  deploymentTeam: 'ally',
 };
 
 const ENVS = [
@@ -180,6 +188,7 @@ function render(){
   body.appendChild(buildEnemyPanel());
   body.appendChild(buildAlliesPanel());
   body.appendChild(buildBattlefieldPanel());
+  body.appendChild(buildDeploymentPanel());
   root.appendChild(body);
 
   // a tiny footer hint
@@ -461,6 +470,114 @@ function buildBattlefieldPanel(){
   return p;
 }
 
+// ---- 5) FORCE DEPLOYMENT ---------------------------------------------------
+function buildDeploymentPanel(){
+  const p = el('div', 'panel deployment-panel');
+  p.style.gridColumn = '1 / -1';
+  const title = headingRow('Force Deployment', '05');
+  const reset = el('button', 'btn ghost small', 'RESET');
+  reset.style.marginLeft = 'auto';
+  reset.onclick = () => {
+    setup.deployment.ally = { ...DEFAULT_DEPLOYMENT.ally };
+    setup.deployment.enemy = { ...DEFAULT_DEPLOYMENT.enemy };
+    setup.deploymentTeam = 'ally';
+    sfx('click'); render();
+  };
+  title.appendChild(reset);
+  p.appendChild(title);
+
+  const intro = el('div', 'muted small');
+  intro.textContent = 'Choose a force, then click or drag anywhere on the map. Aircraft face the opposing force; ships and carriers deploy behind their formation center.';
+  p.appendChild(intro);
+
+  const controls = el('div', 'deployment-controls');
+  const allyBtn = el('button', 'btn deployment-team ally' + (setup.deploymentTeam === 'ally' ? ' sel' : ''), '● ALLIED FORCE');
+  const enemyBtn = el('button', 'btn deployment-team enemy' + (setup.deploymentTeam === 'enemy' ? ' sel' : ''), '● ENEMY FORCE');
+  allyBtn.onclick = () => { setup.deploymentTeam = 'ally'; render(); };
+  enemyBtn.onclick = () => { setup.deploymentTeam = 'enemy'; render(); };
+  controls.appendChild(allyBtn); controls.appendChild(enemyBtn);
+  p.appendChild(controls);
+
+  const map = el('div', 'deployment-map');
+  map.setAttribute('role', 'application');
+  map.setAttribute('aria-label', 'Force starting-position map');
+  map.tabIndex = 0;
+  map.innerHTML = '<span class="deployment-north">NORTH / +Z</span><span class="deployment-axis x"></span><span class="deployment-axis z"></span>';
+
+  const markers = {};
+  const readout = el('div', 'deployment-readout mono');
+  const allyPos = el('span');
+  const enemyPos = el('span');
+  const separation = el('span');
+  readout.appendChild(allyPos); readout.appendChild(enemyPos); readout.appendChild(separation);
+
+  const updateVisuals = () => {
+    for (const team of ['ally', 'enemy']){
+      const pt = setup.deployment[team];
+      markers[team].style.left = ((pt.x + DEPLOY_LIMIT) / (DEPLOY_LIMIT * 2) * 100) + '%';
+      markers[team].style.top = ((DEPLOY_LIMIT - pt.z) / (DEPLOY_LIMIT * 2) * 100) + '%';
+    }
+    allyPos.textContent = `ALLY  X ${signed(setup.deployment.ally.x)} · Z ${signed(setup.deployment.ally.z)}`;
+    enemyPos.textContent = `ENEMY  X ${signed(setup.deployment.enemy.x)} · Z ${signed(setup.deployment.enemy.z)}`;
+    const dist = Math.round(deploymentDistance(setup.deployment));
+    separation.textContent = `SEPARATION  ${dist} m`;
+    separation.className = dist < 700 ? 'warn' : 'good';
+  };
+  const updateFromPointer = (ev, team = setup.deploymentTeam) => {
+    const rect = map.getBoundingClientRect();
+    const px = clamp((ev.clientX - rect.left) / rect.width, 0, 1);
+    const py = clamp((ev.clientY - rect.top) / rect.height, 0, 1);
+    setup.deployment[team] = clampDeploymentPoint({
+      x: (px * 2 - 1) * DEPLOY_LIMIT,
+      z: (1 - py * 2) * DEPLOY_LIMIT,
+    }, DEFAULT_DEPLOYMENT[team]);
+    updateVisuals();
+  };
+  const placeMarker = (team, label) => {
+    const marker = el('button', 'deployment-marker ' + team, label);
+    marker.type = 'button';
+    marker.setAttribute('aria-label', label + ' starting position');
+    marker.title = 'Drag ' + label.toLowerCase() + ' starting position';
+    marker.onpointerdown = (ev) => {
+      ev.stopPropagation();
+      setup.deploymentTeam = team;
+      marker.setPointerCapture(ev.pointerId);
+      updateFromPointer(ev, team);
+    };
+    marker.onpointermove = (ev) => {
+      if (marker.hasPointerCapture(ev.pointerId)) updateFromPointer(ev, team);
+    };
+    marker.onpointerup = (ev) => {
+      if (marker.hasPointerCapture(ev.pointerId)) marker.releasePointerCapture(ev.pointerId);
+      sfx('click');
+    };
+    markers[team] = marker;
+    map.appendChild(marker);
+  };
+  placeMarker('ally', 'ALLY');
+  placeMarker('enemy', 'ENEMY');
+
+  map.onpointerdown = (ev) => { updateFromPointer(ev); sfx('click'); };
+  map.onkeydown = (ev) => {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(ev.key)) return;
+    ev.preventDefault();
+    const team = setup.deploymentTeam;
+    const pt = setup.deployment[team];
+    const step = ev.shiftKey ? 500 : 100;
+    setup.deployment[team] = clampDeploymentPoint({
+      x: pt.x + (ev.key === 'ArrowRight' ? step : ev.key === 'ArrowLeft' ? -step : 0),
+      z: pt.z + (ev.key === 'ArrowUp' ? step : ev.key === 'ArrowDown' ? -step : 0),
+    }, DEFAULT_DEPLOYMENT[team]);
+    updateVisuals();
+  };
+  updateVisuals();
+  p.appendChild(map);
+  p.appendChild(readout);
+  return p;
+}
+
+function signed(n){ return (n >= 0 ? '+' : '') + Math.round(n); }
+
 // a checkbox-style toggle bound to a boolean key of `setup`
 function toggle(key, label, tip){
   const t = el('div');
@@ -667,6 +784,10 @@ function buildConfig(){
     timeLimit,
     carrier,
     enemyCarrier,
+    deployment: {
+      ally: { ...setup.deployment.ally },
+      enemy: { ...setup.deployment.enemy },
+    },
     // pass-through customization flags Battle can honor
     options: {
       infiniteAmmo: setup.infiniteAmmo,

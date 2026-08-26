@@ -6,7 +6,7 @@
 
 ## Modes
 
-- **Creative** — free-form skirmish. Pick a jet, set the enemies and environment, launch instantly.
+- **Creative** — free-form skirmish. Pick a jet, set the enemies and environment, place both forces on a tactical map, and launch instantly. The chosen centers control real aircraft, ship, and carrier spawns.
 - **Campaign** — earn credits, buy aircraft & wingmen, fly missions, climb the ranks.
 - **PvP** — budget-build a fleet and dogfight another human over a relay (see below).
 
