@@ -1835,7 +1835,7 @@ class Sim {
   }
 
   // ---- projectile spawns ----
-  spawnBullet(c, pos, dir, w){
+  spawnBullet(c, pos, dir, w, damageScale = 1){
     const geom = Sim.bulletGeom || (Sim.bulletGeom = new THREE.SphereGeometry(0.6, 6, 4));
     // Tracer materials are SHARED per colour (constant colour/opacity), so firing a stream
     // of rounds allocates no materials and the renderer can batch them. Previously every
@@ -1869,7 +1869,7 @@ class Sim {
     this.bullets.push({
       mesh, trail, team: c.team, owner: c,
       pos: mesh.position, vel: dir.clone().multiplyScalar(w.speed || 1200).add(c.vel),
-      dmg: w.dmg, splash: w.splash || 0, life: 2.6,
+      dmg: w.dmg * damageScale, splash: (w.splash || 0) * damageScale, life: 2.6,
     });
   }
 
@@ -2721,12 +2721,19 @@ class Sim {
     if (!turrets || !turrets.length) return;
     const q = c.group.quaternion;
     // OPTIMISATION: a ship's guns all sit within metres of each other relative to target
-    // ranges of hundreds–thousands, so scan for the nearest hostile ONCE per ship/frame (from
-    // the hull centre, at the widest gun range) instead of once per gun — a big battleship has
-    // dozens of guns, so this is dozens× fewer O(units) scans. Each gun applies its own range.
-    let _maxR = 0; for (const t of turrets){ const r = t.w.turretRange || 1500; if (r > _maxR) _maxR = r; }
-    const _shared = this.nearestEnemy(c, c.pos, _maxR, true);
-    const _sd2 = _shared ? (_shared.pos.x - c.pos.x) ** 2 + (_shared.pos.y - c.pos.y) ** 2 + (_shared.pos.z - c.pos.z) ** 2 : Infinity;
+    // ranges of hundreds–thousands, so scan once per fire-control role (air/surface/legacy)
+    // instead of once per gun — a big battleship has dozens of mounts. Each gun still applies
+    // its own effective range after selecting the nearest valid target for its role.
+    let maxAirR = 0, maxSurfaceR = 0, maxAnyR = 0;
+    for (const t of turrets){
+      const range = t.w.turretRange || 1500;
+      if (t.w.turretTarget === 'air') maxAirR = Math.max(maxAirR, range);
+      else if (t.w.turretTarget === 'surface') maxSurfaceR = Math.max(maxSurfaceR, range);
+      else maxAnyR = Math.max(maxAnyR, range);
+    }
+    const sharedAir = maxAirR ? this.nearestAirEnemy(c.team, c.pos, maxAirR) : null;
+    const sharedSurface = maxSurfaceR ? this.nearestSurfaceEnemy(c.team, c.pos, maxSurfaceR) : null;
+    const sharedAny = maxAnyR ? this.nearestEnemy(c, c.pos, maxAnyR, true) : null;
     for (const t of turrets){
       const w = t.w, node = t.node;
 
@@ -2748,11 +2755,16 @@ class Sim {
       if (node) base.copy(node.position).multiplyScalar(c.group.scale.x || 1).applyQuaternion(q);
       base.add(c.pos);
 
-      // engage the shared per-ship nearest-hostile (scanned once above) only if it's within
-      // THIS gun's own range. ANY gun may target enemy SHIPS too (a player-flown warship's
-      // main guns can shell an enemy carrier).
+      // Engage only the target class this mount is built for, and only inside this gun's
+      // own effective range. Main batteries no longer use anti-air fire control and CIWS/flak
+      // no longer substitute for ship-killing naval guns.
       const range = w.turretRange || 1500;
-      const tgt = (_shared && _sd2 <= range * range) ? _shared : null;
+      const candidate = w.turretTarget === 'air' ? sharedAir
+        : w.turretTarget === 'surface' ? sharedSurface : sharedAny;
+      const targetD2 = candidate
+        ? (candidate.pos.x - c.pos.x) ** 2 + (candidate.pos.y - c.pos.y) ** 2 + (candidate.pos.z - c.pos.z) ** 2
+        : Infinity;
+      const tgt = targetD2 <= range * range ? candidate : null;
       t.target = tgt;
 
       // A turret ONLY traverses to an enemy. With nothing in range it holds its current
@@ -2785,7 +2797,7 @@ class Sim {
       const dir = barrelW.clone();
       const sp = w.spread || 0;
       if (sp){ dir.x += (Math.random() - 0.5) * sp * 2; dir.y += (Math.random() - 0.5) * sp * 2; dir.z += (Math.random() - 0.5) * sp * 2; dir.normalize(); }
-      this.spawnBullet(c, muzzle, dir, w);
+      this.spawnBullet(c, muzzle, dir, w, w.turretDamageScale || 1);
       w.cool = 1 / Math.max(0.1, w.rof);
       w.ammo -= 1;
       if (w.ammo <= 0 && (w.reserve > 0 || c.isAI)) w.reloading = w.reload;
@@ -2808,6 +2820,19 @@ class Sim {
     };
     scan(this.craft);
     if (includeCarriers) scan(this.carriers);
+    return best;
+  }
+
+  // Dedicated anti-air scan for defensive turrets. Surface craft and carriers
+  // are intentionally excluded so CIWS/flak do not become substitute naval guns.
+  nearestAirEnemy(team, from, range){
+    let best = null, bd = range * range;
+    for (const o of this.craft){
+      if (!o.alive || o.team === team || o.isShipCraft || this.isSurface(o)) continue;
+      const dx = o.pos.x - from.x, dy = o.pos.y - from.y, dz = o.pos.z - from.z;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < bd){ bd = d2; best = o; }
+    }
     return best;
   }
 

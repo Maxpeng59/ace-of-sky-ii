@@ -16,6 +16,7 @@
 - **W / S** — throttle trim · **Shift** — afterburner · **Z** — cut engine (glide) · **B** — airbrake
 - **Click** — guns · **right-click / lock** — missiles · **F** — flares
 - **Balloon role** — stays buoyant and uses **A / D** for level left/right turns, **Q / E** to climb/descend, **Space** to drop bombs directly, and **Click** to fire the selected gun. AI balloons use the same yaw steering and vertical control while lining up carrier attacks.
+- Automatic turrets use role-based effective ranges and reduced fire-control damage: CIWS/MG/flak defend against aircraft, while heavy naval batteries target surface ships instead of unrealistically tracking fighters.
 - **V** — toggle the top-down bombardment view and bomb impact/blast prediction
 - In the hangar: **click** to place a part, **Shift+drag** to turn the view, **wheel** to zoom, **R / T / Y** to rotate a part.
 - In the hangar: select a non-missile weapon and press **C** to combine every identical unpaired weapon into one simultaneous-fire group. Groups can contain any number of weapons and appear in flight as `Weapon ×N`; press **C** again to separate the group.

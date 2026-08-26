@@ -108,7 +108,7 @@ export function computeStats(design){
     repair    += def.repair || 0;                 // HP/sec of in-flight self-repair (repair bays)
     if (def.weapon){
       const w = WEAPONS[def.weapon];
-      if (w){ weapons.push({ ...w, ammo: def.ammo || w.clip, mount: c, mountIndex: partIndex, partKey: p.key, fireGroup: p.fireGroup || '', turret: !!def.autoTurret, turretRange: def.turretRange || 0 }); hardpoints++; }
+      if (w){ weapons.push({ ...w, ammo: def.ammo || w.clip, mount: c, mountIndex: partIndex, partKey: p.key, fireGroup: p.fireGroup || '', turret: !!def.autoTurret, turretTarget: def.turretTarget || 'any', turretRange: def.turretRange || 0, turretDamageScale: def.turretDamageScale || 1 }); hardpoints++; }
     }
   }
 
