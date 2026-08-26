@@ -25,6 +25,13 @@ export function balloonVerticalAccel(verticalSpeed, climb, descend, aiVertical =
   return clamp((target - verticalSpeed) * 3.2, -32, 32);
 }
 
+// Balloons steer by rudder/yaw rather than banking like aircraft. Large hulls
+// often calculate very low aerodynamic yaw values, so keep enough authority to
+// reverse direction in combat while still feeling heavier than a fighter.
+export function balloonYawRate(baseYaw){
+  return Math.max(24, Number.isFinite(baseYaw) ? baseYaw : 0);
+}
+
 // Lift load needed to hold altitude at the current bank, capped by the
 // airframe/autopilot limit. A level aircraft needs exactly 1 g; using the
 // maximum load all the time makes every fast aircraft climb forever even when

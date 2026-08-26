@@ -33,7 +33,7 @@
 // ============================================================================
 import * as THREE from 'three';
 import { clamp, lerp, dampF, $, el, show, hide, sfx, toast, fmtNum, mulberry32 } from './util.js';
-import { computeStats, dragForce, thermoStep, partCenter, navalCruise, balloonVerticalAccel, trimmedLiftLoad, AMBIENT_TEMP, OVERHEAT_TEMP, RHO } from './physics.js';
+import { computeStats, dragForce, thermoStep, partCenter, navalCruise, balloonVerticalAccel, balloonYawRate, trimmedLiftLoad, AMBIENT_TEMP, OVERHEAT_TEMP, RHO } from './physics.js';
 import { PARTS } from './parts.js';
 import { State, importCode, exportCode, stockGet } from './core.js';
 import { setScene, onFrame, resetView, getRenderer } from './engine.js';
@@ -60,6 +60,7 @@ const DEG = Math.PI / 180;
 const BANK_SIGN = -1;
 const MAX_BANK = 1.15;            // ≈66° — the bank the auto-coordinator holds at full turn demand
 const BOMBER_MAX_BANK = 0.48;     // ≈28° — heavy bombers retain enough vertical lift in long reversals
+const BALLOON_AIM_TURN = 1.35;    // rad/s — A/D moves the balloon's persistent heading target
 const GROUND_CLEAR = 8;           // belly clearance a craft rests at on the surface (must exceed the +2 crash line)
 const REPAIR_DELAY = 4;           // seconds after a hit before onboard repair bays resume mending
 const SHIP_SCALE = 2;             // the PLAYER's piloted ship (a ship/carrier design flown via makeCraft) renders at
@@ -860,7 +861,7 @@ class Sim {
     // Balloon has dedicated lift keys and a direct bomb trigger; firing guns stays
     // on the mouse so the craft can bomb and defend itself without weapon juggling.
     if (this._helpEl && this.player && this.player.isBalloon){
-      this._helpEl.innerHTML = '<b>MOUSE</b> aim &amp; fly · <b>CLICK</b> fire · <b>Q</b> climb · <b>E</b> descend · <b>SPACE</b> bomb · ' +
+      this._helpEl.innerHTML = '<b>A / D</b> turn left / right · <b>MOUSE</b> aim · <b>CLICK</b> fire · <b>Q</b> climb · <b>E</b> descend · <b>SPACE</b> bomb · ' +
         '<b>SHIFT</b> boost · <b>S</b> brake · <b>Z</b> engine on/off · <b>B</b> airbrake · <b>V</b> bombard view · <b>TAB</b> weapon';
     }
   }
@@ -1400,10 +1401,15 @@ class Sim {
     // --- free-aim: the mouse moves a reticle DIRECTION; the nose chases it at the
     //     airframe's agility turn rate (the steering lives in integrate()). This is
     //     the Gravity Front "fly toward where you're looking" dogfight model. -----
+    if (p.isBalloon){
+      const rudder = (K['d'] ? 1 : 0) - (K['a'] ? 1 : 0);       // A left, D right
+      this.aimYaw += rudder * BALLOON_AIM_TURN * dt;
+      this.aimYaw = Math.atan2(Math.sin(this.aimYaw), Math.cos(this.aimYaw));
+    }
     const cp = Math.cos(this.aimPitch);
     p.flyDir = (p.flyDir || new THREE.Vector3()).set(Math.sin(this.aimYaw) * cp, Math.sin(this.aimPitch), Math.cos(this.aimYaw) * cp);
     p.aimDir = (p.aimDir || new THREE.Vector3()).copy(p.flyDir);   // guns fire along the reticle (see fireWeapon)
-    p.manualRoll = (K['a'] ? 1 : 0) + (K['d'] ? -1 : 0);          // optional manual roll on top of auto-bank
+    p.manualRoll = p.isBalloon ? 0 : (K['a'] ? 1 : 0) + (K['d'] ? -1 : 0); // balloons use A/D as a rudder
     const spaceHeld = !!(K[' '] || K['space'] || K['spacebar']);
     p.balloonClimb = !!p.isBalloon && !!K['q'];
     p.balloonDescend = !!p.isBalloon && !!K['e'] && !p.balloonClimb;
@@ -1459,15 +1465,16 @@ class Sim {
       const yawErr = Math.atan2(wn.dot(right), wn.dot(fwd));
       const pitchErr = Math.asin(clamp(wn.dot(up), -1, 1));
       const gain = c.isPlayer ? 2.4 : 1;                  // the player snaps to the reticle harder than the AI lazily tracks
-      const yawD = clamp(yawErr * gain, -1, 1), pitchD = clamp(pitchErr * gain, -1, 1);
-      dYaw = yawD * ag.yaw * DEG * dt;
-      dPitch = pitchD * ag.pitch * DEG * dt;
+      const yawD = clamp(yawErr * gain, -1, 1);
+      const pitchD = c.isBalloon ? 0 : clamp(pitchErr * gain, -1, 1);
+      dYaw = yawD * (c.isBalloon ? balloonYawRate(ag.yaw) : ag.yaw) * DEG * dt;
+      dPitch = c.isBalloon ? 0 : pitchD * ag.pitch * DEG * dt;
       // coordinated bank — drive roll toward a target bank ANGLE (proportional to the
       // turn demand, capped at MAX_BANK), NOT a raw rate. A rate would integrate without
       // bound in a sustained turn and roll the aircraft inverted (and kill its lift).
       const bankNow = Math.atan2(right.y, up.y);
       const bankCap = (!c.isPlayer && c.hasBombs) ? BOMBER_MAX_BANK : MAX_BANK;
-      const bankWant = yawD * BANK_SIGN * bankCap;
+      const bankWant = c.isBalloon ? 0 : yawD * BANK_SIGN * bankCap;
       const authority = clamp(up.y, 0, 1);               // fade near knife-edge/inverted so loops aren't fought
       let rollD = authority * clamp((bankWant - bankNow) * 3.0, -1, 1);
       if (c.isPlayer) rollD = clamp(rollD + (c.manualRoll || 0), -1, 1);   // manual roll layered on top
@@ -3223,7 +3230,7 @@ class Sim {
         ctx.strokeStyle = 'rgba(120,150,180,.30)';
         ctx.strokeRect(cx - R, cy - R, R * 2, R * 2);
         ctx.beginPath(); ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy); ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R); ctx.stroke();
-        const sx = cx + clamp(p.ctrlRoll, -1, 1) * R;
+        const sx = cx + clamp(p.isBalloon ? p.ctrlYaw : p.ctrlRoll, -1, 1) * R;
         const sy = cy - clamp(p.ctrlPitch, -1, 1) * R;      // up = nose-up demand
         ctx.strokeStyle = 'rgba(57,255,136,.5)';
         ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(sx, sy); ctx.stroke();
