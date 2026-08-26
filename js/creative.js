@@ -15,7 +15,7 @@
 import {
   State, STOCK_DESIGNS, stockGet, libGet, libSave, cloneDesign, statsOf, newDesign,
 } from './core.js';
-import { statLine } from './physics.js';
+import { statLine, navalCruise } from './physics.js';
 import { $, el, clear, show, hide, toast, sfx, clamp, fmtTime } from './util.js';
 import { Hangar } from './hangar.js';
 import { Battle } from './battle.js';
@@ -629,6 +629,7 @@ function safeStatLine(d){
 // a compact stats grid using the .stats design-system class
 function statsGrid(s, design){
   const g = el('div', 'stats');
+  const isShip = !!(design && ['ship', 'cruiser', 'carrier'].includes(design.role));
   const add = (k, v, cls) => {
     const kk = el('div', 'k', k); const vv = el('div', 'v' + (cls ? ' ' + cls : ''), v);
     g.appendChild(kk); g.appendChild(vv);
@@ -636,12 +637,13 @@ function statsGrid(s, design){
   const kmh = (mps) => Math.round(mps * 3.6) + ' km/h';
   add('Mass', (s.mass / 1000).toFixed(2) + ' t');
   add('TWR', s.twr.toFixed(2), s.twr < 0.8 ? 'warn' : 'good');
-  add('Top speed', kmh(s.vMaxBoost || s.vMax));
-  if (design && design.role === 'balloon') add('Buoyancy', 'Neutral · Q climb / E descend', 'good');
+  add('Top speed', isShip ? kmh(navalCruise(s)) : kmh(s.vMaxBoost || s.vMax));
+  if (isShip) add('Handling', 'A / D naval helm', 'good');
+  else if (design && design.role === 'balloon') add('Buoyancy', 'Neutral · Q climb / E descend', 'good');
   else add('Stall', kmh(s.vStall), 'warn');
   add('Durability', Math.round(s.durability) + ' HP');
   add('Agility', Math.round((s.agility.pitch + s.agility.roll + s.agility.yaw) / 3) + '°/s');
-  add('Endurance', fmtTime(s.endurance));
+  add('Endurance', isShip ? 'Continuous' : fmtTime(s.endurance));
   add('Weapons', String((s.weapons || []).length));
   return g;
 }

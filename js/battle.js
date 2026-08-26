@@ -100,6 +100,7 @@ const SHIP_COLLIDE_FRAC = 0.92;   // separate enemy hulls whose hit-spheres over
 const SHIP_TURN_RATE = 0.42;      // rad/s baseline (~24°/s → ~7.5 s to reverse) for a mid-size hull
 const SHIP_TURN_CRUISER = 0.75;   // rad/s for a cruiser — quicker on the helm so it can line up a charge (~43°/s)
 const SHIP_TURN_REF_R = 90;       // hull radius the baseline rate is tuned for; larger hulls scale the rate down
+const PLAYER_SHIP_TURN_RATE = 0.48; // A/D helm authority (~27°/s at speed); level yaw, never aircraft roll
 const TMP = new THREE.Vector3(), TMP2 = new THREE.Vector3(), TMP3 = new THREE.Vector3();
 const _R = new THREE.Vector3(), _ACC = new THREE.Vector3();
 const QTMP = new THREE.Quaternion();
@@ -890,6 +891,9 @@ class Sim {
     if (this._helpEl && this.player && this.player.isBalloon){
       this._helpEl.innerHTML = '<b>A / D</b> turn left / right · <b>MOUSE</b> aim · <b>CLICK</b> fire · <b>Q</b> climb · <b>E</b> descend · <b>SPACE</b> bomb · ' +
         '<b>SHIFT</b> boost · <b>S</b> brake · <b>Z</b> engine on/off · <b>B</b> airbrake · <b>V</b> bombard view · <b>TAB</b> weapon';
+    } else if (this._helpEl && this.player && this.player.isShipCraft){
+      this._helpEl.innerHTML = '<b>A / D</b> steer port / starboard · <b>W / S</b> flank / slow · <b>Z</b> stop engines · ' +
+        '<b>CLICK</b> fire selected manual weapon · automatic turrets acquire and fire by role · <b>TAB</b>/<b>Q</b>/<b>E</b> weapon';
     }
   }
 
@@ -1003,6 +1007,7 @@ class Sim {
       // input/ai intents
       wantGun: false, wantMissile: false, wantBomb: false, wantFlare: false,
       balloonClimb: false, balloonDescend: false,
+      shipRudder: 0, shipHeading: yaw,             // piloted ships use a level A/D naval helm
       fireOverrideIdx: -1,                 // Balloon Space can fire a bomb without changing the selected gun
       aiDesired: null, aiWeaponIdx: -1,
       dropTanksGone: false,
@@ -1298,6 +1303,7 @@ class Sim {
 
   onMouseMove(e){
     if (!this.pointerLocked) return;
+    if (this.player && this.player.isShipCraft) return;          // the helm, not the mouse, turns a ship
     const sens = 0.0026;
     const invert = State.settings && State.settings.invertY ? -1 : 1;
     // move a free reticle direction; the nose chases it (see integrate()).
@@ -1430,15 +1436,19 @@ class Sim {
     // --- free-aim: the mouse moves a reticle DIRECTION; the nose chases it at the
     //     airframe's agility turn rate (the steering lives in integrate()). This is
     //     the Gravity Front "fly toward where you're looking" dogfight model. -----
-    if (p.isBalloon){
+    if (p.isShipCraft){
+      p.shipRudder = (K['d'] ? 1 : 0) - (K['a'] ? 1 : 0);       // A port, D starboard
+    } else if (p.isBalloon){
       const rudder = (K['d'] ? 1 : 0) - (K['a'] ? 1 : 0);       // A left, D right
       this.aimYaw += rudder * BALLOON_AIM_TURN * dt;
       this.aimYaw = Math.atan2(Math.sin(this.aimYaw), Math.cos(this.aimYaw));
     }
-    const cp = Math.cos(this.aimPitch);
-    p.flyDir = (p.flyDir || new THREE.Vector3()).set(Math.sin(this.aimYaw) * cp, Math.sin(this.aimPitch), Math.cos(this.aimYaw) * cp);
+    const controlYaw = p.isShipCraft ? p.shipHeading : this.aimYaw;
+    const controlPitch = p.isShipCraft ? 0 : this.aimPitch;
+    const cp = Math.cos(controlPitch);
+    p.flyDir = (p.flyDir || new THREE.Vector3()).set(Math.sin(controlYaw) * cp, Math.sin(controlPitch), Math.cos(controlYaw) * cp);
     p.aimDir = (p.aimDir || new THREE.Vector3()).copy(p.flyDir);   // guns fire along the reticle (see fireWeapon)
-    p.manualRoll = p.isBalloon ? 0 : (K['a'] ? 1 : 0) + (K['d'] ? -1 : 0); // balloons use A/D as a rudder
+    p.manualRoll = (p.isBalloon || p.isShipCraft) ? 0 : (K['a'] ? 1 : 0) + (K['d'] ? -1 : 0); // balloons/ships use A/D as a rudder
     const spaceHeld = !!(K[' '] || K['space'] || K['spacebar']);
     p.balloonClimb = !!p.isBalloon && !!K['q'];
     p.balloonDescend = !!p.isBalloon && !!K['e'] && !p.balloonClimb;
@@ -1473,6 +1483,7 @@ class Sim {
   //  FLIGHT INTEGRATOR — the physics, all derived from stats.
   // ---------------------------------------------------------------------
   integrate(c, dt){
+    if (c.isShipCraft){ this.integratePlayerShip(c, dt); return; }
     const s = c.stats;
     const mass = Math.max(50, s.dryMass + c.fuel);     // live mass (fuel burns off)
     const fwd = TMP.set(0, 0, 1).applyQuaternion(c.group.quaternion);
@@ -1679,6 +1690,35 @@ class Sim {
 
     // keep group transform synced
     c.group.position.copy(c.pos);
+  }
+
+  // A player-designed ship is a surface vessel, not a very bad airplane. It
+  // accelerates toward naval cruise, turns only around world-up with A/D,
+  // stays level, and follows the local water height with a gentle swell bob.
+  integratePlayerShip(c, dt){
+    const maxSpeed = navalCruise(c.stats);
+    const speedNow = Math.hypot(c.vel.x, c.vel.z);
+    const targetSpeed = c.engineOn ? maxSpeed * clamp(c.throttle, 0, 1) : 0;
+    const speed = dampF(speedNow, targetSpeed, targetSpeed > speedNow ? 0.65 : 1.15, dt);
+    const helmAuthority = 0.22 + 0.78 * clamp(speed / Math.max(1, maxSpeed), 0, 1);
+    if (c.isPlayer) c.shipHeading += (c.shipRudder || 0) * PLAYER_SHIP_TURN_RATE * helmAuthority * dt;
+    c.shipHeading = Math.atan2(Math.sin(c.shipHeading), Math.cos(c.shipHeading));
+
+    const fwdX = Math.sin(c.shipHeading), fwdZ = Math.cos(c.shipHeading);
+    c.vel.set(fwdX * speed, 0, fwdZ * speed);
+    c.pos.x += c.vel.x * dt;
+    c.pos.z += c.vel.z * dt;
+    c.pos.y = this.shipRestY(c);
+    c.speed = speed;
+    c.stalled = false;
+    c.ctrlPitch = 0; c.ctrlYaw = c.shipRudder || 0; c.ctrlRoll = 0;
+    c.group.quaternion.setFromAxisAngle(_TV.set(0, 1, 0), c.shipHeading);
+    c.group.position.copy(c.pos);
+
+    if (c.repairRate > 0){
+      if (c.repairCool > 0) c.repairCool -= dt;
+      else if (c.hp < c.maxHp) c.hp = Math.min(c.maxHp, c.hp + c.repairRate * dt);
+    }
   }
 
   surfaceHeight(x, z){
@@ -2943,8 +2983,10 @@ class Sim {
     // The camera looks ALONG the aim reticle (not the banking nose) so the crosshair
     // stays screen-centred over an upright horizon while the airframe rolls below it
     // — the Gravity Front chase view. When dead, the last aim direction is kept.
-    const cp = Math.cos(this.aimPitch), sp = Math.sin(this.aimPitch);
-    const aimFwd = TMP.set(Math.sin(this.aimYaw) * cp, sp, Math.cos(this.aimYaw) * cp);
+    const cameraYaw = p.isShipCraft ? p.shipHeading : this.aimYaw;
+    const cameraPitch = p.isShipCraft ? -0.05 : this.aimPitch;
+    const cp = Math.cos(cameraPitch), sp = Math.sin(cameraPitch);
+    const aimFwd = TMP.set(Math.sin(cameraYaw) * cp, sp, Math.cos(cameraYaw) * cp);
     const cm = (p.scaleMul || 1);                            // a piloted ship sits farther from the eye
     const dollyBack = (30 + clamp(p.speed * 0.03, 0, 16)) * cm;
     const desired = TMP2.copy(p.pos).addScaledVector(aimFwd, -dollyBack);
@@ -3027,6 +3069,7 @@ class Sim {
     const type = this.objective.type;
     const enemiesAlive = this.craft.filter(c => c.alive && c.team !== 0).length;
     const enemyCarrierAlive = this.carriers.some(cc => cc.alive && cc.team === 1);
+    const hostilesAlive = enemiesAlive + this.carriers.filter(cc => cc.alive && cc.team !== 0).length;
     const friendlyCarrier = this.carriers.find(cc => cc.team === 0);
 
     if (type === 'deathmatch' || type === 'pvp'){
@@ -3035,22 +3078,22 @@ class Sim {
         if (this.netSpawned && enemiesAlive === 0 && this.craft.some(c => c.team === 1)){
           this.endBattle(true, 'Enemy fleet destroyed');
         }
-      } else if (enemiesAlive === 0 && this.craft.length > 0){
+      } else if (hostilesAlive === 0 && (this.craft.length > 0 || this.carriers.length > 0)){
         this.endBattle(true, 'All enemies destroyed');
       }
     } else if (type === 'survive'){
       if (this.time >= this.timeLimit){ this.endBattle(true, 'Survived'); }
-      else if (enemiesAlive === 0 && this.cfg.enemies && this.cfg.enemies.length){ this.endBattle(true, 'All enemies destroyed'); }
+      else if (hostilesAlive === 0 && this.cfg.enemies && this.cfg.enemies.length){ this.endBattle(true, 'All enemies destroyed'); }
     } else if (type === 'sink'){
       if (!enemyCarrierAlive){ this.endBattle(true, 'Enemy carrier sunk'); }
     } else if (type === 'escort'){
       if (friendlyCarrier && !friendlyCarrier.alive){ this.endBattle(false, 'Carrier was lost'); }
-      else if (enemiesAlive === 0){ this.endBattle(true, 'Carrier escorted safely'); }
+      else if (hostilesAlive === 0){ this.endBattle(true, 'Carrier escorted safely'); }
     }
 
     // generic timeout (non-survive)
     if (this.timeLimit && type !== 'survive' && this.time >= this.timeLimit){
-      this.endBattle(enemiesAlive === 0, 'Time up');
+      this.endBattle(hostilesAlive === 0, 'Time up');
     }
   }
 
@@ -3334,14 +3377,21 @@ class Sim {
         const ammoTxt = w.reloading > 0 ? 'RELOAD…' : (w.ammo + (w.reserve ? '+' + w.reserve : ''));
         const count = weaponMembers(w).length;
         this.dom.weapon.textContent = `▸ ${w.name}${count > 1 ? ' ×' + count : ''}  [${ammoTxt}${count > 1 ? ' each' : ''}]  (${p.curWeapon + 1}/${p.weapons.length})  ✦${p.flares}`;
-      } else this.dom.weapon.textContent = 'NO WEAPONS';
+      } else this.dom.weapon.textContent = (p.turrets && p.turrets.length) ? 'AUTO BATTERY' : 'NO WEAPONS';
+      if (p.turrets && p.turrets.length){
+        const tracking = p.turrets.filter(t => t.target && t.target.alive).length;
+        this.dom.weapon.textContent += `  ·  AUTO ${tracking}/${p.turrets.length}`;
+      }
       // speed / alt / throttle
       const kmh = Math.round(p.speed * 3.6);
       const alt = Math.round(p.pos.y - this.groundY);
       this.dom.spd.textContent = `SPD ${kmh} km/h`;
       this.dom.alt.textContent = `ALT ${alt} m`;
       this.dom.thr.textContent = `THR ${Math.round(p.throttle * 100)}%${p.boost ? ' +AB' : ''}${p.engineOn ? '' : ' ⏻OFF'}${p.airbrakeOn ? ' ✖BRAKE' : ''}${p.isBalloon ? ' · BALLOON' : ''}`;
-      this.dom.mach.textContent = p.isBalloon
+      const shipHeadingDeg = ((p.shipHeading || 0) * 180 / Math.PI + 360) % 360;
+      this.dom.mach.textContent = p.isShipCraft
+        ? `NAVAL HELM · ${p.shipRudder < 0 ? 'PORT' : p.shipRudder > 0 ? 'STARBOARD' : 'STEADY'} · HDG ${String(Math.round(shipHeadingDeg)).padStart(3, '0')}°`
+        : p.isBalloon
         ? (p.balloonClimb ? 'ASCENDING' : (p.balloonDescend ? 'DESCENDING' : 'BUOYANCY HOLD'))
         : (p.stalled ? 'STALL' : (kmh > 1100 ? 'SUPERSONIC' : ''));
       this.dom.mach.className = 'v-mach' + (p.stalled ? ' hud-warn-tone' : '');
@@ -3349,17 +3399,19 @@ class Sim {
       // warnings
       if (p.stalled) this.flashMsgLow('STALL — LOWER NOSE / ADD POWER');
       else if (p.temp > p.stats.overheat * 0.95) this.flashMsgLow('OVERHEAT');
-      else if (p.fuel <= 0) this.flashMsgLow('NO FUEL');
+      else if (p.fuel <= 0 && !p.isShipCraft) this.flashMsgLow('NO FUEL');
     }
 
     // ---- objective sub line ----
     if (this.dom.objsub){
       const enemiesAlive = this.craft.filter(c => c.alive && c.team !== 0).length;
+      const hostileShips = this.carriers.filter(c => c.alive && c.team !== 0).length;
+      const hostilesAlive = enemiesAlive + hostileShips;
       let sub = '';
       if (this.objective.type === 'survive'){ sub = `Survive ${Math.max(0, Math.ceil(this.timeLimit - this.time))}s · Bandits ${enemiesAlive}`; }
       else if (this.objective.type === 'sink'){ const cc = this.carriers.find(c => c.team === 1); sub = cc ? `Carrier HP ${Math.max(0, Math.round(cc.hp))}` : 'Carrier sunk'; }
       else if (this.objective.type === 'escort'){ const cc = this.carriers.find(c => c.team === 0); sub = cc && cc.alive ? `Carrier HP ${Math.max(0, Math.round(cc.hp))} · Bandits ${enemiesAlive}` : 'Carrier lost'; }
-      else { sub = `Bandits remaining: ${enemiesAlive} · Kills ${this.result.kills}`; }
+      else { sub = `Hostiles remaining: ${hostilesAlive} · Kills ${this.result.kills}`; }
       this.dom.objsub.textContent = sub;
     }
 
