@@ -44,6 +44,7 @@ import { initAI, updateAI, updateBomber, updateCarrierPD, pickTarget, updateSqua
 import { Music } from './music.js';
 import { buildDamageZoneHitboxes, hitDamageZone as intersectDamageZone } from './damage-zones.js';
 import { normalizeDeployment, deploymentYaw, formationPosition } from './deployment.js';
+import { seaWaveHeight, sampleSeaWave } from './water.js';
 
 // ---------------------------------------------------------------------------
 //  Environment presets — sky gradient, sun, fog and surface look per env.
@@ -175,17 +176,16 @@ function makeGroundTex(baseHex){
 // vs the play scale, so the +8 m float clearance keeps the collision feel intact.
 function updateSeaGeo(geo, base, t){
   const pa = geo.attributes.position, na = geo.attributes.normal;
-  const a = 0.0042, b = 0.0056, c = 0.011;
+  const wave = {};
   for (let i = 0; i < pa.count; i++){
     const x = base[i * 2], z = base[i * 2 + 1];
-    const px = x * a + t * 0.55, pz = z * b + t * 0.43, pd = (x + z) * c + t * 0.95;
-    const cosD = Math.cos(pd);
-    pa.setY(i, Math.sin(px) * 3.4 + Math.cos(pz) * 2.7 + Math.sin(pd) * 1.2);
+    sampleSeaWave(x, z, t, wave);
+    pa.setY(i, wave.height);
     // ANALYTIC surface normal from the wave slope. This replaces geo.computeVertexNormals(),
     // which re-walked all ~50k faces every frame and was the single biggest cost in the sim
     // (≈8 ms/frame). The wave is a known function, so the normal is just (-dh/dx, 1, -dh/dz).
-    const dhdx = 3.4 * a * Math.cos(px) + 1.2 * c * cosD;
-    const dhdz = -2.7 * b * Math.sin(pz) + 1.2 * c * cosD;
+    const dhdx = wave.dhdx;
+    const dhdz = wave.dhdz;
     const inv = 1 / Math.sqrt(dhdx * dhdx + 1 + dhdz * dhdz);
     na.setXYZ(i, -dhdx * inv, inv, -dhdz * inv);
   }
@@ -1722,17 +1722,17 @@ class Sim {
   }
 
   surfaceHeight(x, z){
-    if (this.env.sea) return Math.sin(x * 0.01) * 1.6 + Math.cos(z * 0.013) * 1.4;
+    if (this.env.sea) return seaWaveHeight(x, z, this.seaT || 0);
     return Math.sin(x * 0.004) * 22 + Math.cos(z * 0.0033) * 26;
   }
 
   // the Y a piloted SHIP floats at: the local sea surface + a believable draft (scales with the
-  // hull's height × its render scale, so a tall ship rides higher) + a gentle swell bob. This sits
-  // the vessel on the water at ≈sea level instead of GROUND_CLEAR×scaleMul (~17 m) up in the air.
+  // hull's height × its render scale, so a tall ship rides higher). The animated swell itself
+  // supplies the bob; a separate sine would detach the hull from the rendered water.
   shipRestY(c){
     const surfY = this.surfaceHeight(c.pos.x, c.pos.z);
     const draft = Math.max(1, ((c.stats && c.stats.bbox && c.stats.bbox.size.y) || 3) * (c.scaleMul || 1) * 0.15);
-    return surfY + draft + (this.env.sea ? Math.sin((this.time || 0) * 0.6) * 0.5 : 0);
+    return surfY + draft;
   }
 
   // ---------------------------------------------------------------------
@@ -2659,7 +2659,7 @@ class Sim {
       }
     }
     cc.pos.addScaledVector(cc.vel, dt);
-    cc.pos.y = this.env.sea ? 4 + Math.sin(this.time * 0.6) * 0.6 : 14;
+    cc.pos.y = this.env.sea ? seaWaveHeight(cc.pos.x, cc.pos.z, this.seaT || 0) + 4 : 14;
     cc.mesh.position.copy(cc.pos);
     cc.mesh.rotation.y = cc.heading;
 
