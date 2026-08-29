@@ -189,6 +189,9 @@ const LIST = [
   { key: 'armor_carbon', name: 'Carbon Armor', category: 'armor', size: [1, 1, 1], mass: 45, cost: 140, hp: 10, armor: 25,
     desc: '+25 HP carbon-fiber armor. Exactly half the mass and protection of Light Armor.',
     build: (T, d) => a_armor(T, d, { color: '#252c33', thick: 0.55 }) },
+  { key: 'armor_ultralight', name: 'Ultralight Armor', category: 'armor', size: [1, 1, 1], mass: 5, cost: 35, hp: 0, armor: 5,
+    desc: '+5 armor from a wafer-thin protective skin weighing only 5 kg.',
+    build: (T, d) => a_armor(T, d, { color: '#aeb9c4', thick: 0.18 }) },
 
   // ---------------- GUNS ----------------
   { key: 'gun_mg', name: 'Machine Gun', category: 'gun', size: [1, 1, 2], mass: 80, cost: 300, hp: 20, weapon: 'mg', ammo: 1200, heatGen: 20000, drag: 0.04,
