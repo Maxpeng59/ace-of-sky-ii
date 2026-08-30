@@ -666,7 +666,7 @@ export const Menu = {
     // ---- footer credit / quit hint ----
     const foot = el('div', 'row');
     foot.style.justifyContent = 'space-between'; foot.style.marginTop = '6px'; foot.style.opacity = '.7';
-    foot.appendChild(el('div', 'faint small mono', 'forward = +Z · WASD throttle/roll · mouse aim · Shift boost · Balloon: Q/E lift, Space bomb'));
+    foot.appendChild(el('div', 'faint small mono', 'forward = +Z · WASD throttle/roll · mouse aim · Shift boost · Balloon: Q/E lift, P weapon, Space bomb'));
     foot.appendChild(el('div', 'faint small mono', 'Ace of Sky II'));
     content.appendChild(foot);
 

@@ -639,7 +639,7 @@ function statsGrid(s, design){
   add('TWR', s.twr.toFixed(2), s.twr < 0.8 ? 'warn' : 'good');
   add('Top speed', isShip ? kmh(navalCruise(s)) : kmh(s.vMaxBoost || s.vMax));
   if (isShip) add('Handling', 'A / D naval helm', 'good');
-  else if (design && design.role === 'balloon') add('Buoyancy', 'Neutral · Q climb / E descend', 'good');
+  else if (design && design.role === 'balloon') add('Buoyancy', 'Q climb · E descend · P weapon', 'good');
   else add('Stall', kmh(s.vStall), 'warn');
   add('Durability', Math.round(s.durability) + ' HP');
   add('Agility', Math.round((s.agility.pitch + s.agility.roll + s.agility.yaw) / 3) + '°/s');

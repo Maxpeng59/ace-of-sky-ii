@@ -15,7 +15,8 @@
 //      thermoStep heat → overheat damage, durability HP pool, armor soak,
 //      gravity, and ground/sea collision.
 //    - Player controls: W/S throttle, mouse pitch+yaw (invertY respected),
-//      A/D roll, Shift boost, Space fire (Balloon: climb), Tab/Q/E cycle weapon, F flares,
+//      A/D roll, Shift boost, Space fire (Balloon: bomb), Tab/Q/E cycle weapon,
+//      Balloon P cycle weapon, F flares,
 //      G jettison drop tanks. Chase camera with lag + shake.
 //    - Combat: guns (fast tracer projectiles), missiles (homeMissile),
 //      lockmissile (LockSystem full-lock then auto-fire), bombs (ballistic).
@@ -886,11 +887,11 @@ class Sim {
 
     this.world.player = this.player;
 
-    // Balloon has dedicated lift keys and a direct bomb trigger; firing guns stays
-    // on the mouse so the craft can bomb and defend itself without weapon juggling.
+    // Balloon has dedicated lift keys, a direct bomb trigger, and P for weapon cycling
+    // because Q/E are reserved for vertical control.
     if (this._helpEl && this.player && this.player.isBalloon){
       this._helpEl.innerHTML = '<b>A / D</b> turn left / right · <b>MOUSE</b> aim · <b>CLICK</b> fire · <b>Q</b> climb · <b>E</b> descend · <b>SPACE</b> bomb · ' +
-        '<b>SHIFT</b> boost · <b>S</b> brake · <b>Z</b> engine on/off · <b>B</b> airbrake · <b>V</b> bombard view · <b>TAB</b> weapon';
+        '<b>P</b> switch weapon · <b>SHIFT</b> boost · <b>S</b> brake · <b>Z</b> engine on/off · <b>B</b> airbrake · <b>V</b> bombard view';
     } else if (this._helpEl && this.player && this.player.isShipCraft){
       this._helpEl.innerHTML = '<b>A / D</b> steer port / starboard · <b>W / S</b> flank / slow · <b>Z</b> stop engines · ' +
         '<b>CLICK</b> fire selected manual weapon · automatic turrets acquire and fire by role · <b>TAB</b>/<b>Q</b>/<b>E</b> weapon';
@@ -1270,6 +1271,9 @@ class Sim {
     else if (k === 'z'){ e.preventDefault(); this.toggleEngine(); }
     else if (k === 'b'){ this.toggleAirbrake(); }
     else if (k === 'v' && !e.repeat){ this.toggleBombView(); }
+    else if (k === 'p' && this.player && this.player.isBalloon){
+      if (!e.repeat) this.cycleWeapon(1);
+    }
     else if (k === 'p'){ this.assistOn = !this.assistOn; this.flashMsg(this.assistOn ? 'AIM ASSIST ON' : 'AIM ASSIST OFF', this.assistOn ? 'good' : '', 1.0); }
     else if (k === 'f'){ this.firePlayerFlare(); }
     else if (k === 'g'){ this.jettison(this.player); }
