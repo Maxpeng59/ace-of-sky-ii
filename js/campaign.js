@@ -73,7 +73,7 @@ export const MISSIONS = [
   {
     id: 'm_patrol',
     title: 'Dawn Patrol',
-    brief: 'Recon drones are probing the border. Sweep them from the sky before they map our defences. A clean introductory sortie.',
+    brief: 'Recon drones are probing a Global Force security corridor. Sweep them from the sky before they map the coalition defences.',
     env: 'day',
     reward: 4200,
     needsCarrier: false,
@@ -168,6 +168,98 @@ export const MISSIONS = [
     enemies: [{ stock: 'stock_falcon', count: 6, skill: 0.4 }],
     objective: { type: 'deathmatch', label: 'Clear all 6 night runners' },
     timeLimit: 0,
+  },
+  {
+    id: 'm_polarshield',
+    title: 'Polar Shield',
+    brief: 'Long-range raiders are crossing the polar route beneath a communications blackout. Intercept them before they reach the civilian air corridor.',
+    env: 'day',
+    reward: 8800,
+    needsCarrier: false,
+    requires: ['m_patrol'],
+    enemies: [
+      { stock: 'stock_fortress', count: 2, skill: 0.48 },
+      { stock: 'stock_falcon', count: 3, skill: 0.46 },
+    ],
+    objective: { type: 'deathmatch', label: 'Break the polar bomber formation' },
+    timeLimit: 180,
+  },
+  {
+    id: 'm_med_lifeline',
+    title: 'Mediterranean Lifeline',
+    brief: 'A relief fleet is trapped between two hostile air groups. Keep your carrier afloat and open a safe lane through the fighting.',
+    env: 'sea',
+    reward: 13200,
+    needsCarrier: true,
+    requires: ['m_intercept'],
+    enemies: [
+      { stock: 'stock_falcon', count: 4, skill: 0.56 },
+      { stock: 'stock_goliath', count: 2, skill: 0.5 },
+    ],
+    objective: { type: 'escort', label: 'Hold the relief corridor for 3 minutes' },
+    timeLimit: 180,
+  },
+  {
+    id: 'm_sahel_thunder',
+    title: 'Sahel Thunder',
+    brief: 'A desert offensive has overrun three forward strips. Fly low through the dust front and destroy the aircraft covering the advance.',
+    env: 'dusk',
+    reward: 11800,
+    needsCarrier: false,
+    requires: ['m_intercept'],
+    enemies: [
+      { stock: 'stock_falcon', count: 5, skill: 0.54 },
+      { stock: 'stock_goliath', count: 1, skill: 0.58 },
+    ],
+    objective: { type: 'deathmatch', label: 'Clear the desert offensive air cover' },
+    timeLimit: 210,
+  },
+  {
+    id: 'm_pacific_spear',
+    title: 'Pacific Spear',
+    brief: 'An enemy carrier group is cutting the ocean supply chain. Find the flagship in open water, fight through its combat patrol, and sink it.',
+    env: 'sea',
+    reward: 19400,
+    needsCarrier: false,
+    enemyCarrier: 'stock_carrier',
+    requires: ['m_escort'],
+    enemies: [
+      { stock: 'stock_falcon', count: 4, skill: 0.62 },
+      { stock: 'stock_goliath', count: 2, skill: 0.6 },
+    ],
+    objective: { type: 'strike', label: 'Sink the Pacific carrier group' },
+    timeLimit: 240,
+  },
+  {
+    id: 'm_skybridge',
+    title: 'Himalayan Skybridge',
+    brief: 'Mountain passes are the last route into an encircled city. Survive repeated attacks while command pushes transports through the high corridor.',
+    env: 'day',
+    reward: 16800,
+    needsCarrier: false,
+    requires: ['m_aceduel'],
+    enemies: [
+      { stock: 'stock_falcon', count: 4, skill: 0.63 },
+      { stock: 'stock_fortress', count: 2, skill: 0.58 },
+    ],
+    objective: { type: 'survive', label: 'Keep the skybridge open through 3 waves', waves: 3 },
+    timeLimit: 240,
+  },
+  {
+    id: 'm_firebreak',
+    title: 'Global Firebreak',
+    brief: 'The separate wars have merged into one coordinated offensive. Global Command is committing every available squadron to stop the chain reaction.',
+    env: 'night',
+    reward: 32000,
+    needsCarrier: true,
+    requires: ['m_gauntlet', 'm_pacific_spear', 'm_skybridge'],
+    enemies: [
+      { stock: 'stock_falcon', count: 5, skill: 0.72 },
+      { stock: 'stock_fortress', count: 3, skill: 0.7 },
+      { stock: 'stock_goliath', count: 2, skill: 0.75 },
+    ],
+    objective: { type: 'survive', label: 'Stop the worldwide offensive', waves: 4 },
+    timeLimit: 300,
   },
   {
     id: 'm_decisive',
@@ -272,6 +364,7 @@ export const Campaign = {
     if (!root){ console.error('campaign: #screen-campaign missing'); return; }
     const c = State.campaign;
     if (!c.rank) c.rank = 'Cadet';
+    if (!Number.isFinite(c.worldSeed) || c.worldSeed <= 0) c.worldSeed = Math.floor(Math.random() * 0x7fffffff) + 1;
     // migrate older saves: anyone with real progress skips the first-run flow.
     if (c.onboard == null) c.onboard = (c.completed.length || c.carrierId || c.started) ? 'done' : 'intro';
     c.started = true;
@@ -285,6 +378,7 @@ export const Campaign = {
     save();
     hideOtherScreens();
     root.classList.remove('hidden');
+    root.classList.add('campaign-global');
 
     buildShell();
     selectTab(curTab);
@@ -357,10 +451,10 @@ function renderOnboarding(){
 
 function onboardIntro(){
   const pages = [
-    { eyebrow: 'Frontier Command · 06:00', title: 'You have the watch',
-      body: `Cadet — the border skies have stopped being quiet. Recon drones probe our airspace nightly, and Command is desperately short of pilots.<br><br>You've been issued a <b>Falcon</b> — a clean single-seat interceptor — and a flight slot. Everything else, you earn in the air.` },
-    { eyebrow: 'Frontier Command · 06:02', title: 'First, prove you can fly',
-      body: `Before they trust you with a real contract you'll fly a <b>training intercept</b>: one lone <b>target drone</b>, low-grade AI. Splash it and you're cleared for operations.<br><br>Clear that, and Command stakes you a <b>carrier</b> of your own design and an operating budget for your first home-built fighter. From there the war pays its own way.` },
+    { eyebrow: 'Global Force Command · 06:00', title: 'The world is on fire',
+      body: `Cadet — several wars have erupted across the globe at once. Global Force has been formed to move pilots, carriers and aircraft wherever a front breaks open.<br><br>You've been issued a <b>Falcon</b> — a clean single-seat interceptor — and a place in the worldwide response wing. Every sortie can send you to a different country.` },
+    { eyebrow: 'Global Force Command · 06:02', title: 'First, prove you can fly',
+      body: `Before Global Force trusts you with a live task, you'll fly a <b>training intercept</b>: one lone <b>target drone</b>, low-grade AI. Splash it and the Earth operations map opens.<br><br>Command will then stake you a <b>carrier</b> of your own design and an operating budget for a home-built fighter. From there, the worldwide wars pay their own way.` },
   ];
   let i = 0;
   const render = () => {
@@ -457,9 +551,9 @@ function buildShell(){
   bar.style.marginBottom = '18px';
 
   const brand = el('div');
-  brand.innerHTML = '<div class="eyebrow">Campaign</div>';
+  brand.innerHTML = '<div class="eyebrow">Global Force Campaign</div>';
   const title = el('div'); title.style.cssText = 'font-size:20px;font-weight:800;letter-spacing:.04em;';
-  title.textContent = 'Operations';
+  title.textContent = 'Worldwide Operations';
   brand.appendChild(title);
   bar.appendChild(brand);
 
@@ -1132,50 +1226,85 @@ function missionUnlocked(m){
 }
 
 // ===========================================================================
-//  WORLD MAP — a curated Earth theatre map with DYNAMIC control. Each region
-//  hosts a curated story mission (or two) plus a repeatable patrol; winning
-//  pushes its control toward you. Secure the regions FEEDING a sector (control
-//  ≥ OPEN_AT) to unlock it, and reach SECURE to lock it down. The enemy presses
-//  every other un-secured region a notch each sortie, so the front keeps moving.
+//  GLOBAL OPERATIONS MAP — real-world country locations on an Earth silhouette.
+//  Four wars are active at once. Every campaign day deterministically shuffles
+//  the story missions onto different countries and adds a small position jitter;
+//  the pins stay stable while the player reads the map, then move after a sortie.
 // ===========================================================================
-const REGIONS = [
-  { id: 'home',    name: 'Home Waters',    x: 170, y: 380, tier: 1, start: 50, env: 'sea',   requires: [],                  missions: ['m_patrol', 'm_nightwatch'] },
-  { id: 'reach',   name: 'The Reach',      x: 300, y: 120, tier: 1, start: 42, env: 'day',   requires: [],                  missions: ['m_intercept'] },
-  { id: 'desert',  name: 'Desert Line',    x: 540, y: 300, tier: 2, start: 18, env: 'day',   requires: ['home'],            missions: ['m_escort'] },
-  { id: 'straits', name: 'The Straits',    x: 800, y: 350, tier: 2, start: 18, env: 'sea',   requires: ['reach'],           missions: ['m_aceduel'] },
-  { id: 'iron',    name: 'Iron Coast',     x: 470, y: 180, tier: 3, start: 8,  env: 'dusk',  requires: ['desert'],          missions: ['m_strike'] },
-  { id: 'cross',   name: 'Southern Cross', x: 360, y: 470, tier: 3, start: 8,  env: 'night', requires: ['straits'],         missions: ['m_gauntlet'] },
-  { id: 'citadel', name: 'The Citadel',    x: 630, y: 150, tier: 4, start: 0,  env: 'night', requires: ['iron', 'cross'],   missions: ['m_decisive'] },
+const MAP_W = 1200, MAP_H = 600;
+const SECURE = 100, OPEN_AT = 65;
+const WAR_FRONTS = [
+  { id: 'atlantic', name: 'Atlantic Coalition War', color: '#51c9ff' },
+  { id: 'eurasia',  name: 'Eurasian Continental War', color: '#ff657f' },
+  { id: 'indo',     name: 'Indo-Pacific Naval War', color: '#ffb84d' },
+  { id: 'sahel',    name: 'Sahel Emergency', color: '#c58cff' },
 ];
-const SECURE = 100, OPEN_AT = 65;   // secured at 100%; a region's feeds unlock it at ≥65%
+const GLOBAL_LOCATIONS = [
+  { id: 'canada', country: 'Canada', site: 'Hudson Bay', lon: -92, lat: 57, front: 'atlantic', start: 48 },
+  { id: 'usa', country: 'United States', site: 'Great Plains', lon: -99, lat: 39, front: 'atlantic', start: 54 },
+  { id: 'mexico', country: 'Mexico', site: 'Gulf Coast', lon: -101, lat: 23, front: 'atlantic', start: 38 },
+  { id: 'brazil', country: 'Brazil', site: 'Atlantic Coast', lon: -47, lat: -15, front: 'atlantic', start: 34 },
+  { id: 'argentina', country: 'Argentina', site: 'Patagonian Corridor', lon: -65, lat: -39, front: 'atlantic', start: 31 },
+  { id: 'uk', country: 'United Kingdom', site: 'North Sea', lon: -2, lat: 54, front: 'atlantic', start: 51 },
+  { id: 'france', country: 'France', site: 'Western Approaches', lon: 2, lat: 46, front: 'atlantic', start: 44 },
+  { id: 'norway', country: 'Norway', site: 'Arctic Coast', lon: 10, lat: 62, front: 'eurasia', start: 37 },
+  { id: 'ukraine', country: 'Ukraine', site: 'Black Sea Front', lon: 31, lat: 49, front: 'eurasia', start: 24 },
+  { id: 'turkey', country: 'Türkiye', site: 'Anatolian Corridor', lon: 35, lat: 39, front: 'eurasia', start: 29 },
+  { id: 'egypt', country: 'Egypt', site: 'Suez Corridor', lon: 30, lat: 27, front: 'sahel', start: 32 },
+  { id: 'nigeria', country: 'Nigeria', site: 'Gulf of Guinea', lon: 8, lat: 9, front: 'sahel', start: 26 },
+  { id: 'kenya', country: 'Kenya', site: 'East African Rift', lon: 38, lat: 1, front: 'sahel', start: 27 },
+  { id: 'south_africa', country: 'South Africa', site: 'Cape Route', lon: 24, lat: -30, front: 'sahel', start: 35 },
+  { id: 'india', country: 'India', site: 'Himalayan Approach', lon: 79, lat: 22, front: 'indo', start: 36 },
+  { id: 'japan', country: 'Japan', site: 'Home Islands', lon: 138, lat: 37, front: 'indo', start: 42 },
+  { id: 'philippines', country: 'Philippines', site: 'Luzon Strait', lon: 122, lat: 13, front: 'indo', start: 28 },
+  { id: 'indonesia', country: 'Indonesia', site: 'Java Sea', lon: 118, lat: -2, front: 'indo', start: 30 },
+  { id: 'australia', country: 'Australia', site: 'Coral Sea', lon: 134, lat: -25, front: 'indo', start: 47 },
+];
 
+function mapPoint(lon, lat){ return { x: (lon + 180) / 360 * MAP_W, y: (90 - lat) / 180 * MAP_H }; }
+function frontFor(id){ return WAR_FRONTS.find(f => f.id === id) || WAR_FRONTS[0]; }
+function seededRandom(seed){
+  let a = seed >>> 0;
+  return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+function activeOperations(){
+  const c = State.campaign;
+  const rand = seededRandom(((c.worldSeed || 1) ^ Math.imul(c.day || 1, 0x9e3779b1)) >>> 0);
+  const places = GLOBAL_LOCATIONS.slice();
+  for (let i = places.length - 1; i > 0; i--){ const j = Math.floor(rand() * (i + 1)); [places[i], places[j]] = [places[j], places[i]]; }
+  return MISSIONS.map((mission, i) => {
+    const loc = places[i % places.length], p = mapPoint(loc.lon, loc.lat);
+    const tier = Math.min(4, 1 + Math.floor(i / 4));
+    return { ...loc, name: loc.country, x: clamp(p.x + (rand() - 0.5) * 18, 28, MAP_W - 28),
+      y: clamp(p.y + (rand() - 0.5) * 12, 34, MAP_H - 34), tier, env: mission.env,
+      missions: [mission.id], operation: i + 1 };
+  });
+}
 function ensureRegions(){
   const c = State.campaign;
   if (!c.regions) c.regions = {};
-  for (const r of REGIONS){ if (!c.regions[r.id]) c.regions[r.id] = { control: r.start }; }
+  for (const r of GLOBAL_LOCATIONS){ if (!c.regions[r.id]) c.regions[r.id] = { control: r.start }; }
 }
 function regionCtrl(id){ ensureRegions(); return State.campaign.regions[id] ? State.campaign.regions[id].control : 0; }
-function regionAccessible(r){ return (r.requires || []).every(req => regionCtrl(req) >= OPEN_AT); }
+function regionAccessible(r){ const m = missionById(r.missions[0]); return !!m && missionUnlocked(m); }
 function ctrlColor(v){ return v >= OPEN_AT ? '#5fd0ff' : v >= 28 ? '#e0b14a' : '#d9534f'; }
 
-// A repeatable, control-pushing patrol scaled to the region's tier.
 function patrolFor(r){
   return {
-    id: 'patrol_' + r.id, title: r.name + ' Patrol', patrol: true, env: r.env,
+    id: 'patrol_' + r.id, title: r.country + ' Air Patrol', patrol: true, env: r.env,
     reward: 1200 + r.tier * 700, requires: [], needsCarrier: false,
     enemies: [{ stock: 'stock_falcon', count: Math.min(6, 1 + r.tier), skill: Math.min(0.85, 0.34 + r.tier * 0.09) }],
-    objective: { type: 'deathmatch', label: 'Clear the patrol sector' }, timeLimit: 0,
-    brief: 'Routine sweep over ' + r.name + '. Light contact expected — push the enemy back a notch.',
+    objective: { type: 'deathmatch', label: 'Clear the airspace over ' + r.country }, timeLimit: 0,
+    brief: 'Global Command has a repeatable patrol over ' + r.site + '. Sweep the sector and shift local control in our favour.',
   };
 }
 
-// Win/lose shifts the region's control; the enemy then drifts every OTHER front.
 function shiftRegionControl(id, win, isPatrol, firstClear){
   ensureRegions();
   const rc = State.campaign.regions[id]; if (!rc) return;
   if (win) rc.control = Math.min(SECURE, rc.control + (isPatrol ? 12 : (firstClear ? 35 : 18)));
   else rc.control = Math.max(0, rc.control - 6);
-  for (const r of REGIONS){
+  for (const r of GLOBAL_LOCATIONS){
     if (r.id === id) continue;
     const o = State.campaign.regions[r.id];
     if (o && o.control > 0 && o.control < SECURE) o.control = Math.max(0, o.control - 1);
@@ -1183,32 +1312,43 @@ function shiftRegionControl(id, win, isPatrol, firstClear){
   save();
 }
 
-function worldMapSVG(){
+function worldMapSVG(regions){
   ensureRegions();
-  const W = 1000, H = 560;
-  let s = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;background:#0b1420;">`;
-  s += '<g stroke="#16273a" stroke-width="1">';
-  for (let x = 0; x <= W; x += 80) s += `<line x1="${x}" y1="0" x2="${x}" y2="${H}"/>`;
-  for (let y = 0; y <= H; y += 80) s += `<line x1="0" y1="${y}" x2="${W}" y2="${y}"/>`;
+  let s = `<svg class="global-earth" viewBox="0 0 ${MAP_W} ${MAP_H}" role="img" aria-label="World map with ${regions.length} global operations">`;
+  s += '<defs><radialGradient id="oceanGlow"><stop offset="0" stop-color="#17344b"/><stop offset="1" stop-color="#07111c"/></radialGradient><filter id="pinGlow"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>';
+  s += `<rect width="${MAP_W}" height="${MAP_H}" fill="url(#oceanGlow)"/>`;
+  s += '<g class="earth-grid">';
+  for (let x = 100; x < MAP_W; x += 100) s += `<line x1="${x}" y1="0" x2="${x}" y2="${MAP_H}"/>`;
+  for (let y = 100; y < MAP_H; y += 100) s += `<line x1="0" y1="${y}" x2="${MAP_W}" y2="${y}"/>`;
   s += '</g>';
-  const land = ['120,110 300,90 330,300 250,470 130,450 80,290', '300,80 700,70 740,210 540,250 360,230 300,150', '470,250 650,255 630,440 500,460 450,355', '720,130 905,150 915,360 800,400 720,300'];
-  s += '<g fill="#1d2c39" stroke="#33485c" stroke-width="1.5">';
-  for (const p of land) s += `<polygon points="${p}"/>`;
-  s += '</g>';
-  s += '<g stroke-width="2.5" stroke-dasharray="4 5">';
-  for (const r of REGIONS) for (const req of (r.requires || [])){
-    const a = REGIONS.find(x => x.id === req); const lit = regionCtrl(req) >= OPEN_AT;
-    s += `<line x1="${a.x}" y1="${a.y}" x2="${r.x}" y2="${r.y}" stroke="${lit ? '#3a6a8a' : '#2a3a4a'}"/>`;
+  s += '<g class="earth-land">' +
+    '<path d="M70 105 L105 72 165 55 216 66 262 88 314 91 354 122 345 151 315 167 293 205 262 236 224 222 199 191 163 181 137 198 111 177 92 145 Z"/>' +
+    '<path d="M345 40 L393 28 435 51 420 93 381 106 348 80 Z"/>' +
+    '<path d="M330 235 L380 246 421 286 440 342 426 401 397 472 366 521 343 469 349 410 324 355 308 292 Z"/>' +
+    '<path d="M545 114 L583 96 627 105 654 128 688 137 704 169 681 192 646 187 626 210 590 201 568 174 536 160 Z"/>' +
+    '<path d="M592 205 L657 199 703 229 724 286 706 354 674 421 633 474 604 418 593 350 562 298 566 246 Z"/>' +
+    '<path d="M674 108 L731 75 804 65 873 79 932 68 1004 88 1089 116 1133 151 1115 188 1064 201 1032 232 990 226 958 260 908 269 872 242 823 251 789 223 747 217 713 188 692 152 Z"/>' +
+    '<path d="M805 252 L846 265 869 304 850 338 817 323 794 285 Z"/>' +
+    '<path d="M964 375 L1018 357 1083 374 1128 415 1112 469 1053 493 994 478 952 432 Z"/>' +
+    '<path d="M1091 191 L1110 175 1123 203 1107 229 1094 216 Z"/><path d="M999 287 L1018 278 1032 305 1020 333 1004 316 Z"/>' +
+    '</g>';
+  s += '<g class="country-lines"><path d="M190 84L211 190M254 92L228 220M363 259L417 338M380 332L425 401M600 117L626 202M649 205L619 348M681 218L704 350M729 113L746 216M790 101L803 242M861 83L873 241M944 82L958 258M1021 94L1002 231M1000 381L1056 482"/></g>';
+  const frontGroups = WAR_FRONTS.map(f => regions.filter(r => r.front === f.id));
+  s += '<g class="war-lines">';
+  for (let fi = 0; fi < frontGroups.length; fi++){
+    const group = frontGroups[fi], front = WAR_FRONTS[fi];
+    for (let i = 1; i < group.length; i++) s += `<line x1="${group[i - 1].x}" y1="${group[i - 1].y}" x2="${group[i].x}" y2="${group[i].y}" stroke="${front.color}"/>`;
   }
   s += '</g>';
-  for (const r of REGIONS){
-    const v = regionCtrl(r.id), col = ctrlColor(v), acc = regionAccessible(r), rad = 11 + r.tier * 2;
-    s += `<g data-region="${r.id}" style="cursor:pointer" opacity="${acc ? 1 : 0.45}">`;
-    s += `<circle cx="${r.x}" cy="${r.y}" r="${rad + 6}" fill="${col}" opacity="0.14"/>`;
-    s += `<circle cx="${r.x}" cy="${r.y}" r="${rad}" fill="${col}" stroke="#0b1420" stroke-width="2.5"/>`;
-    if (v >= SECURE) s += `<circle cx="${r.x}" cy="${r.y}" r="${rad + 3}" fill="none" stroke="#9fe6ff" stroke-width="2"/>`;
-    s += `<text x="${r.x}" y="${r.y + rad + 18}" text-anchor="middle" font-size="15" font-weight="700" fill="#cfe0ee">${r.name}</text>`;
-    s += `<text x="${r.x}" y="${r.y + rad + 34}" text-anchor="middle" font-size="12" fill="${col}" font-family="monospace">${v >= SECURE ? 'SECURED' : v + '%'}${acc ? '' : ' 🔒'}</text>`;
+  for (const r of regions){
+    const m = missionById(r.missions[0]), v = regionCtrl(r.id), col = ctrlColor(v), acc = regionAccessible(r), rad = 10 + r.tier;
+    s += `<g data-region="${r.id}" class="operation-pin${acc ? '' : ' locked'}" tabindex="0" role="button" aria-label="Operation ${r.operation}, ${m.title}, ${r.country}">`;
+    s += `<title>OP ${String(r.operation).padStart(2, '0')} · ${m.title} · ${r.country}</title>`;
+    s += `<circle class="operation-pulse" cx="${r.x}" cy="${r.y}" r="${rad + 8}" fill="${frontFor(r.front).color}"/>`;
+    s += `<circle cx="${r.x}" cy="${r.y}" r="${rad}" fill="${col}" stroke="#06101a" stroke-width="3" filter="url(#pinGlow)"/>`;
+    s += `<text x="${r.x}" y="${r.y + 4}" text-anchor="middle" class="operation-number">${r.operation}</text>`;
+    s += `<text x="${r.x}" y="${r.y + rad + 17}" text-anchor="middle" class="operation-country">${r.country}</text>`;
+    s += `<text x="${r.x}" y="${r.y + rad + 30}" text-anchor="middle" class="operation-status">${acc ? (v >= SECURE ? 'SECURED' : v + '%') : 'LOCKED'}</text>`;
     s += '</g>';
   }
   s += '</svg>';
@@ -1217,10 +1357,13 @@ function worldMapSVG(){
 
 function contractRow(region, m, isPatrol){
   const done = !isPatrol && State.campaign.completed.includes(m.id);
-  const row = el('div', 'card'); row.style.cssText = 'margin-top:10px;padding:12px;';
+  const unlocked = isPatrol || missionUnlocked(m);
+  const row = el('div', 'card global-contract');
+  if (!unlocked) row.classList.add('locked');
   const t = el('div', 'row'); const nm = el('div'); nm.style.cssText = 'font-weight:700;'; nm.textContent = m.title; t.appendChild(nm);
   t.appendChild(el('div', 'spacer'));
   if (done) t.appendChild(el('div', 'tag', '✔'));
+  else if (!unlocked) t.appendChild(el('div', 'tag', 'LOCKED'));
   const rew = el('div', 'tag'); rew.style.color = 'var(--gold)';
   rew.textContent = '+' + fmtCr(isPatrol ? m.reward : (done ? Math.round(m.reward * 0.4) : m.reward));
   t.appendChild(rew); row.appendChild(t);
@@ -1228,52 +1371,60 @@ function contractRow(region, m, isPatrol){
   const threat = (m.enemies || []).reduce((a, e) => a + e.count, 0);
   row.appendChild(el('div', 'mono small faint', 'Threat: ' + threat + ' aircraft' + (m.enemyCarrier ? ' + carrier' : '') + (isPatrol ? '  ·  repeatable' : '')));
   const act = el('div', 'row'); act.style.marginTop = '10px';
-  const go = el('button', 'btn accent', isPatrol ? '➤ Fly Patrol' : (done ? '↻ Fly Again' : '➤ Deploy'));
-  go.onclick = () => openDeploy({ ...m, _regionId: region.id });
+  const go = el('button', 'btn accent', !unlocked ? 'Campaign prerequisite locked' : (isPatrol ? '➤ Fly Patrol' : (done ? '↻ Fly Again' : '➤ Deploy')));
+  go.disabled = !unlocked;
+  if (unlocked) go.onclick = () => openDeploy({ ...m, _regionId: region.id, country: region.country, site: region.site, front: frontFor(region.front).name });
   act.appendChild(go); row.appendChild(act);
+  if (!unlocked){
+    const need = (m.requires || []).filter(id => !State.campaign.completed.includes(id)).map(id => missionById(id)?.title || id);
+    row.appendChild(el('div', 'small mono warn', 'Complete first: ' + need.join(', ')));
+  }
   return row;
 }
 
 function renderRegionDetail(c, r){
-  if (!r){ c.appendChild(el('div', 'muted', 'No accessible theatre. Secure a frontier region to push the front and open the next.')); return; }
-  const v = regionCtrl(r.id);
-  c.appendChild(el('div', 'eyebrow', 'Theatre · tier ' + r.tier));
-  const h = el('div'); h.style.cssText = 'font-size:22px;font-weight:800;margin:2px 0 8px;'; h.textContent = r.name; c.appendChild(h);
-  const bar = el('div'); bar.style.cssText = 'height:9px;border-radius:5px;background:#1c2c3e;overflow:hidden;';
-  const fill = el('div'); fill.style.cssText = `height:100%;width:${v}%;background:${ctrlColor(v)};transition:width .3s;`; bar.appendChild(fill); c.appendChild(bar);
-  c.appendChild(el('div', 'small mono', v >= SECURE ? 'SECURED — under your control' : ('Control: ' + v + '%'))).style.marginTop = '5px';
-  c.appendChild(el('h3', '', 'Contracts'));
-  for (const mid of r.missions){ const m = missionById(mid); if (m) c.appendChild(contractRow(r, m, false)); }
+  if (!r){ c.appendChild(el('div', 'muted', 'No global operations available.')); return; }
+  const v = regionCtrl(r.id), m = missionById(r.missions[0]), front = frontFor(r.front);
+  const eyebrow = el('div', 'eyebrow', 'Operation ' + String(r.operation).padStart(2, '0') + ' · tier ' + r.tier); eyebrow.style.color = front.color; c.appendChild(eyebrow);
+  const h = el('div', 'global-country-title', r.country); c.appendChild(h);
+  c.appendChild(el('div', 'small muted', r.site + ' · ' + front.name));
+  const bar = el('div', 'global-control-bar');
+  const fill = el('div'); fill.style.cssText = `width:${v}%;background:${ctrlColor(v)};`; bar.appendChild(fill); c.appendChild(bar);
+  c.appendChild(el('div', 'small mono', v >= SECURE ? 'SECURED — under Global Force control' : ('Local control: ' + v + '%')));
+  c.appendChild(el('h3', '', 'Assigned Task'));
+  if (m) c.appendChild(contractRow(r, m, false));
+  c.appendChild(el('h3', '', 'Regional Response'));
   c.appendChild(contractRow(r, patrolFor(r), true));
 }
 
 function renderWorldMap(){
   ensureRegions();
   clear(dom.body);
-  const wrap = el('div'); wrap.style.cssText = 'display:grid;grid-template-columns:1fr 360px;gap:16px;align-items:start;';
-  const mapPanel = el('div', 'panel'); mapPanel.style.cssText = 'padding:12px;';
-  const mh = el('div', 'row'); mh.appendChild(el('div', 'eyebrow', 'Theatre Map')); mh.appendChild(el('div', 'spacer'));
-  const sec = REGIONS.filter(r => regionCtrl(r.id) >= SECURE).length;
-  mh.appendChild(el('div', 'pill mono', sec + ' / ' + REGIONS.length + ' secured'));
-  mapPanel.appendChild(mh);
-  const svgWrap = el('div'); svgWrap.style.cssText = 'margin-top:8px;border-radius:10px;overflow:hidden;border:1px solid #1c2c3e;';
-  svgWrap.innerHTML = worldMapSVG();
-  svgWrap.querySelector('svg').addEventListener('click', (e) => {
-    const g = e.target.closest('[data-region]'); if (!g) return;
-    const r = REGIONS.find(x => x.id === g.getAttribute('data-region')); if (!r) return;
-    if (!regionAccessible(r)){ toast('Locked — secure the regions feeding it first', 'bad'); sfx('lock'); return; }
-    curRegion = r.id; sfx('click'); renderWorldMap();
-  });
+  const regions = activeOperations();
+  const banner = el('div', 'global-war-banner');
+  const copy = el('div'); copy.innerHTML = '<div class="eyebrow">Global Force Command</div><div class="global-war-title">WORLDWIDE CONFLICT RESPONSE</div><div class="small muted">Multiple wars have erupted. Missions are reassigned to new countries whenever the campaign day advances.</div>'; banner.appendChild(copy);
+  const warList = el('div', 'global-war-list');
+  for (const f of WAR_FRONTS){ const chip = el('div', 'war-chip'); chip.style.borderColor = f.color; chip.innerHTML = `<i style="background:${f.color}"></i>${f.name}`; warList.appendChild(chip); }
+  banner.appendChild(warList); dom.body.appendChild(banner);
+
+  const wrap = el('div', 'campaign-world-layout');
+  const mapPanel = el('div', 'panel campaign-world-panel');
+  const mh = el('div', 'row'); mh.appendChild(el('div', 'eyebrow', 'Live Earth Operations Map')); mh.appendChild(el('div', 'spacer'));
+  mh.appendChild(el('div', 'pill mono', regions.length + ' active tasks'));
+  const reroute = el('button', 'btn small ghost', '↻ Reroute Tasks');
+  reroute.onclick = () => { State.campaign.worldSeed = Math.floor(Math.random() * 0x7fffffff) + 1; curRegion = null; save(); sfx('click'); renderWorldMap(); };
+  mh.appendChild(reroute); mapPanel.appendChild(mh);
+  const svgWrap = el('div', 'campaign-world-map'); svgWrap.innerHTML = worldMapSVG(regions);
+  const selectRegion = (node) => { const r = regions.find(x => x.id === node.getAttribute('data-region')); if (!r) return; curRegion = r.id; sfx('click'); renderWorldMap(); };
+  svgWrap.querySelector('svg').addEventListener('click', (e) => { const g = e.target.closest('[data-region]'); if (g) selectRegion(g); });
+  svgWrap.querySelector('svg').addEventListener('keydown', (e) => { if (e.key !== 'Enter' && e.key !== ' ') return; const g = e.target.closest('[data-region]'); if (g){ e.preventDefault(); selectRegion(g); } });
   mapPanel.appendChild(svgWrap);
-  const lg = el('div', 'row small muted'); lg.style.cssText = 'margin-top:10px;gap:16px;flex-wrap:wrap;';
-  lg.innerHTML = '<span style="color:#d9534f">● Enemy-held</span><span style="color:#e0b14a">● Contested</span><span style="color:#5fd0ff">● Yours</span><span style="color:#9fe6ff">◎ Secured</span>';
-  mapPanel.appendChild(lg);
-  wrap.appendChild(mapPanel);
-  const detail = el('div', 'panel'); detail.style.cssText = 'padding:18px;';
-  const r = REGIONS.find(x => x.id === curRegion && regionAccessible(x)) || REGIONS.find(x => regionAccessible(x));
-  curRegion = r ? r.id : null;
-  renderRegionDetail(detail, r);
-  wrap.appendChild(detail);
+  const lg = el('div', 'global-map-legend');
+  lg.innerHTML = '<span style="color:#d9534f">● Enemy-held</span><span style="color:#e0b14a">● Contested</span><span style="color:#5fd0ff">● Global Force</span><span>Mission locations reroute each day</span>';
+  mapPanel.appendChild(lg); wrap.appendChild(mapPanel);
+  const detail = el('div', 'panel global-operation-detail');
+  const r = regions.find(x => x.id === curRegion) || regions.find(x => regionAccessible(x)) || regions[0];
+  curRegion = r ? r.id : null; renderRegionDetail(detail, r); wrap.appendChild(detail);
   dom.body.appendChild(wrap);
 }
 
@@ -1362,6 +1513,11 @@ function openDeploy(mission){
   const m = openModal('Deploy — ' + mission.title, true);
 
   // brief
+  if (mission.country){
+    const loc = el('div', 'global-deploy-location');
+    loc.innerHTML = `<span>GLOBAL FORCE TASKING</span><b>${mission.country}</b><small>${mission.site || 'Forward sector'} · ${mission.front || 'Worldwide conflict zone'}</small>`;
+    m.body.appendChild(loc);
+  }
   m.body.appendChild(el('div', 'small muted', mission.brief));
   const obj = el('div', 'mono small'); obj.style.cssText = 'margin:8px 0;color:var(--accent)';
   obj.textContent = '▸ ' + mission.objective.label + '   ·   Reward ' + fmtCr(mission.reward);
