@@ -31,6 +31,7 @@ export const PLANNER_TASKS = Object.freeze([
 
 const GROUPS = ['Razor','Anvil','Reaper','Vortex','Hammer','Wraith','Tempest','Cerberus','Nightmare','Titan'];
 const MAX_DESIGN_CODE = 120000;
+const MAX_MISSION_CODE = 8000000;
 const MAX_PARTS = 300;
 const pick = (r,a) => a[Math.floor(r()*a.length)];
 const int = (r,a,b) => a + Math.floor(r()*(b-a+1));
@@ -120,7 +121,7 @@ export function encodeMissionPlan(plan){return'AOS2-MP2-'+enc(JSON.stringify(pla
 export function decodeMissionPlan(code){
   try{
     code=String(code||'').trim();
-    if(!code.startsWith('AOS2-MP2-')||code.length>4000000)return null;
+    if(!code.startsWith('AOS2-MP2-')||code.length>MAX_MISSION_CODE)return null;
     const plan=JSON.parse(dec(code.slice(9)));
     if(plan.v!==PLANNER_VERSION||!Number.isInteger(plan.seed)||!Array.isArray(plan.blueprints)||!plan.blueprints.length)return null;
     const canonical=generateMissionPlan(plan.seed,plan.blueprints.map(bp=>bp&&bp.code));

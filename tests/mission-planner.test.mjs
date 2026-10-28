@@ -40,4 +40,10 @@ assert.equal(decodeMissionPlan('AOS2-MP2-'+tamperedPayload),null,'tampered share
 const evil=designCode('<img src=x onerror=alert(1)>','fighter');
 const sanitized=generateMissionPlan(2,[evil]);
 assert.equal(sanitized.blueprints[0].name,'<img src=x onerror=alert(1)>','names remain data and must be rendered with textContent');
+const manyCodes=Array.from({length:40},(_,i)=>designCode(`Library Aircraft ${i+1}`,'fighter',i%8));
+const capped=generateMissionPlan(99,manyCodes);
+assert.equal(capped.blueprints.length,32,'the picker must safely cap oversized libraries');
+assert.equal(capped.forces.length,32,'every accepted library selection must become a task group');
+assert.ok(capped.forces.every(f=>f.count>=1&&f.count<=3),'large custom pools must keep the battle spawn count bounded');
+assert.deepEqual(decodeMissionPlan(encodeMissionPlan(capped)),capped,'maximum custom pool must remain portable');
 console.log(`PASS: ${PLANNER_MAPS.length} maps, ${PLANNER_TASKS.length} tasks, custom-library blueprints and portable MP2 codes.`);
