@@ -20,6 +20,7 @@ import {
 } from './util.js';
 import { Music } from './music.js';
 import { Creative } from './creative.js';
+import { MissionPlanner } from './mission-planner.js';
 import { Campaign } from './campaign.js';
 import { Pvp } from './pvp.js';
 import { Hangar } from './hangar.js';
@@ -27,7 +28,7 @@ import { Hangar } from './hangar.js';
 // ---------------------------------------------------------------------------
 //  Screen plumbing
 // ---------------------------------------------------------------------------
-const SCREEN_IDS = ['screen-menu', 'screen-creative', 'screen-campaign', 'screen-pvp', 'screen-hangar'];
+const SCREEN_IDS = ['screen-menu', 'screen-creative', 'screen-mission-planner', 'screen-campaign', 'screen-pvp', 'screen-hangar'];
 
 // Hide every screen root, and the in-flight HUD, then reveal one.
 function hideAllScreens(){
@@ -585,6 +586,10 @@ function buildModeButtons(){
   wrap.appendChild(modeBtn(
     'CREATIVE', 'Free-form skirmish. Pick your jet, set the enemies, launch instantly.',
     'accent', () => { exitMenu(); Creative.show(); },
+  ));
+  wrap.appendChild(modeBtn(
+    'MISSION PLANNER', 'Select allowed enemy aircraft, generate an extreme random operation, and share its play code.',
+    'danger', () => { exitMenu(); MissionPlanner.show(); },
   ));
   wrap.appendChild(modeBtn(
     'CAMPAIGN', 'Earn credits, buy aircraft & wingmen, fly missions, climb the ranks.',

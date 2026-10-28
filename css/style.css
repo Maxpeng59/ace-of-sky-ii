@@ -118,6 +118,34 @@ label.field{ display:flex; flex-direction:column; gap:5px; font-size:12px; color
 .deployment-readout .good{ color:var(--good); }.deployment-readout .warn{ color:var(--warn); }
 @media (max-width:700px){ .deployment-readout{ grid-template-columns:1fr; }.deployment-controls{ flex-direction:column; } }
 
+/* ---- Mission Planner --------------------------------------------------- */
+#screen-mission-planner{ overflow:auto; align-items:stretch; justify-content:flex-start;
+  background:radial-gradient(900px 520px at 80% 8%,rgba(126,18,37,.22),transparent 70%),linear-gradient(#07111c,#03070c); }
+.mission-planner-screen{ gap:16px; }
+.planner-topbar{ max-width:1260px;width:100%;margin:0 auto; }
+.planner-title{ font-size:22px;font-weight:900;letter-spacing:.08em; }
+.planner-rank{ padding:8px 13px;border:1px solid #8e263d;border-radius:4px;background:#28101a;color:#ff7891;font:800 11px var(--mono);letter-spacing:.1em; }
+.planner-hero{ display:grid;grid-template-columns:1fr auto;gap:24px;align-items:center;max-width:1260px;width:100%;margin:0 auto;padding:22px;
+  border:1px solid #543044;border-left:5px solid var(--bad);border-radius:var(--r);background:linear-gradient(110deg,rgba(35,14,25,.97),rgba(9,24,39,.95)); }
+.planner-hero h2{ margin:5px 0 7px;font-size:clamp(20px,3vw,34px);letter-spacing:.035em; }.planner-hero p{ max-width:800px;margin:0;color:var(--ink-dim);line-height:1.55; }
+.planner-danger{ min-width:185px;text-align:center;padding:17px 14px;border:1px solid #8e263d;background:#190b11;color:#ff6984;font:900 14px var(--mono);letter-spacing:.1em; }
+.planner-danger small{ display:block;margin-top:5px;font-size:9px;color:#bd7b88; }
+.planner-grid{ display:grid;grid-template-columns:1.35fr .65fr;gap:16px;max-width:1260px;width:100%;margin:0 auto; }
+.planner-section-title{ display:flex;align-items:center;gap:9px;margin-bottom:9px; }.planner-section-title span{ color:#ff6480;font:800 11px var(--mono);letter-spacing:.14em; }.planner-section-title h2{ margin:0;font-size:19px; }
+.planner-aircraft-grid{ display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px; }
+.planner-aircraft-card{ display:grid;grid-template-columns:1fr auto;gap:3px 10px;text-align:left;padding:12px;border:1px solid var(--edge);border-radius:var(--r2);background:#0a1421;color:var(--ink);cursor:pointer; }
+.planner-aircraft-card b{ font-size:14px; }.planner-aircraft-card span{ grid-column:1;color:var(--ink-dim);font-size:11px;text-transform:uppercase; }.planner-aircraft-card i{ grid-column:2;grid-row:1/3;align-self:center;color:#7a8593;font:800 9px var(--mono);font-style:normal; }
+.planner-aircraft-card.sel{ border-color:#ff5876;box-shadow:inset 0 0 22px rgba(255,71,105,.12); }.planner-aircraft-card.sel i{ color:#ff718b; }
+.planner-player-stats{ display:grid;grid-template-columns:1fr repeat(3,auto);gap:8px;margin-top:12px;padding:11px;border:1px solid var(--edge);border-radius:5px;background:#09131e; }.planner-player-stats span{ color:var(--ink-dim);font:11px var(--mono); }
+.planner-warning{ margin-top:12px;padding:10px;border-left:3px solid var(--warn);background:rgba(224,177,74,.08);color:var(--warn);font-size:12px;line-height:1.5; }
+.planner-code-panel,.planner-result{ max-width:1260px;width:100%;margin:0 auto; }.planner-code-panel textarea{ width:100%;margin-top:6px;font:11px var(--mono);resize:vertical; }
+.planner-operation-banner{ display:flex;align-items:center;justify-content:space-between;gap:16px;padding:17px;border:1px solid #703046;background:linear-gradient(90deg,#26101a,#0b1b2a);border-radius:6px; }
+.planner-operation-banner h2{ margin:3px 0;font-size:25px; }.planner-operation-banner p{ margin:0;color:var(--ink-dim); }.planner-operation-banner>div:last-child{ text-align:center; }.planner-operation-banner strong{ display:block;color:#ff6b86;font:900 36px var(--mono); }.planner-operation-banner small{ color:#c18692;font:9px var(--mono);letter-spacing:.14em; }
+.planner-facts{ display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin:12px 0; }.planner-facts>div{ display:flex;flex-direction:column;gap:4px;padding:11px;border:1px solid var(--edge);background:#08121d;border-radius:5px; }.planner-facts small,.planner-facts span{ color:var(--ink-dim);font:9px var(--mono);letter-spacing:.08em; }.planner-facts b{ font-size:13px; }
+.planner-task-groups{ display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:9px; }.planner-task-card{ display:flex;flex-direction:column;gap:3px;padding:12px;border:1px solid var(--edge);border-left:3px solid #ff5876;border-radius:5px;background:#09131e; }.planner-task-card span{ color:#ff7891;font:9px var(--mono);letter-spacing:.1em;text-transform:uppercase; }.planner-task-card small{ color:var(--ink-dim); }
+.planner-mods{ display:flex;gap:8px;flex-wrap:wrap;margin:12px 0; }.planner-launch{ width:100%;padding:15px; }
+@media(max-width:760px){ .planner-hero{ grid-template-columns:1fr; }.planner-danger{ min-width:0; }.planner-grid{ grid-template-columns:1fr; }.planner-aircraft-grid,.planner-facts{ grid-template-columns:1fr; }.planner-player-stats{ grid-template-columns:1fr 1fr; }.planner-rank{ display:none; } }
+
 /* ---- Campaign global-force Earth operations map ---- */
 #screen-campaign.campaign-global{
   background:

@@ -77,7 +77,7 @@ let root = null;       // #screen-creative
 let keyHandler = null;
 
 function hideOtherScreens(){
-  for (const id of ['screen-menu', 'screen-campaign', 'screen-pvp', 'screen-hangar']){
+  for (const id of ['screen-menu', 'screen-mission-planner', 'screen-campaign', 'screen-pvp', 'screen-hangar']){
     const n = $(id); if (n) hide(n);
   }
   const hud = $('hud'); if (hud) hide(hud);

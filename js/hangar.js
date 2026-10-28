@@ -166,7 +166,7 @@ function ensureScreenRoot(){
 function buildDOM(){
   const root = ensureScreenRoot();
   // Switch to the hangar grid layout. Hide every OTHER screen so only we show.
-  for (const id of ['screen-menu', 'screen-creative', 'screen-campaign', 'screen-pvp']){
+  for (const id of ['screen-menu', 'screen-creative', 'screen-mission-planner', 'screen-campaign', 'screen-pvp']){
     const o = $(id); if (o) o.classList.add('hidden');
   }
   const hud = $('hud'); if (hud) hud.classList.add('hidden');

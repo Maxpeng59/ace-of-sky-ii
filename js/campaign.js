@@ -61,9 +61,9 @@ function randomCallsign(){ return CALLSIGNS[Math.floor(Math.random() * CALLSIGNS
 // ---------------------------------------------------------------------------
 //  MISSIONS — the heart of the loop. Each is a discrete challenge with a brief,
 //  an environment, an objective passed verbatim to Battle.start, an enemy
-//  loadout (stock designs scaled by count + skill), a reward, and optional
-//  prerequisites (mission ids in State.campaign.completed). Some require the
-//  player's carrier to exist (escort/strike teach the carrier economy).
+//  loadout (stock designs scaled by count + skill) and a reward. Every mission
+//  is available immediately. Capital-ship missions provide a command-support
+//  carrier when the player has not commissioned their own.
 //
 //  enemy entries reference STOCK_DESIGNS by id; Battle resolves them via
 //  stockGet().  objective.type is whatever Battle understands — we keep to a
@@ -76,8 +76,6 @@ export const MISSIONS = [
     brief: 'Recon drones are probing a Global Force security corridor. Sweep them from the sky before they map the coalition defences.',
     env: 'day',
     reward: 4200,
-    needsCarrier: false,
-    requires: [],
     enemies: [{ stock: 'stock_falcon', count: 4, skill: 0.3 }],
     objective: { type: 'deathmatch', label: 'Destroy all 4 recon drones' },
     timeLimit: 0,
@@ -88,8 +86,6 @@ export const MISSIONS = [
     brief: 'A flight of heavy bombers with light escort is inbound on the airfield. Tear into them before they reach their release point.',
     env: 'dusk',
     reward: 7600,
-    needsCarrier: false,
-    requires: ['m_patrol'],
     enemies: [
       { stock: 'stock_fortress', count: 2, skill: 0.45 },
       { stock: 'stock_falcon', count: 3, skill: 0.4 },
@@ -103,8 +99,7 @@ export const MISSIONS = [
     brief: 'Your carrier is steaming through contested waters. Enemy strike craft want it on the sea floor — keep them off it until the channel is clear.',
     env: 'sea',
     reward: 9800,
-    needsCarrier: true,
-    requires: ['m_intercept'],
+    friendlyCarrier: 'stock_carrier',
     enemies: [
       { stock: 'stock_falcon', count: 3, skill: 0.55 },
       { stock: 'stock_falcon', count: 2, skill: 0.5 },
@@ -115,14 +110,11 @@ export const MISSIONS = [
   {
     id: 'm_aceduel',
     title: 'Ace Duel: "Crimson"',
-    brief: 'The enemy\'s top ace flies a hand-built interceptor and has never lost. One aircraft, one pilot, one winner. No wingmen — this is personal.',
+    brief: 'The enemy\'s top ace flies a hand-built interceptor and has never lost. Take on Crimson alone or bring your wingmen — the choice is yours.',
     env: 'day',
     reward: 12000,
-    needsCarrier: false,
-    requires: ['m_intercept'],
-    soloOnly: true,
     enemies: [{ stock: 'stock_falcon', count: 1, skill: 0.95, name: 'Crimson' }],
-    objective: { type: 'deathmatch', label: 'Defeat the ace, one on one' },
+    objective: { type: 'deathmatch', label: 'Defeat the ace' },
     timeLimit: 0,
   },
   {
@@ -131,9 +123,7 @@ export const MISSIONS = [
     brief: 'Recon found the enemy flat-top anchored in the bay, ringed by air cover. Punch through, put it under the waves, and get home.',
     env: 'sea',
     reward: 16500,
-    needsCarrier: false,
     enemyCarrier: 'stock_carrier',
-    requires: ['m_escort'],
     enemies: [
       { stock: 'stock_falcon', count: 3, skill: 0.6 },
       { stock: 'stock_falcon', count: 4, skill: 0.45 },
@@ -147,8 +137,6 @@ export const MISSIONS = [
     brief: 'Wave after wave, no reinforcements. Survive everything they send and you walk away rich. Bring everyone you can afford.',
     env: 'night',
     reward: 22000,
-    needsCarrier: false,
-    requires: ['m_aceduel', 'm_strike'],
     enemies: [
       { stock: 'stock_falcon', count: 4, skill: 0.6 },
       { stock: 'stock_falcon', count: 3, skill: 0.65 },
@@ -163,8 +151,6 @@ export const MISSIONS = [
     brief: 'Smugglers run drones under cover of darkness. Hunt them down — they\'re cheap, but there are a lot of them and you can\'t see far.',
     env: 'night',
     reward: 6400,
-    needsCarrier: false,
-    requires: ['m_patrol'],
     enemies: [{ stock: 'stock_falcon', count: 6, skill: 0.4 }],
     objective: { type: 'deathmatch', label: 'Clear all 6 night runners' },
     timeLimit: 0,
@@ -175,8 +161,6 @@ export const MISSIONS = [
     brief: 'Long-range raiders are crossing the polar route beneath a communications blackout. Intercept them before they reach the civilian air corridor.',
     env: 'day',
     reward: 8800,
-    needsCarrier: false,
-    requires: ['m_patrol'],
     enemies: [
       { stock: 'stock_fortress', count: 2, skill: 0.48 },
       { stock: 'stock_falcon', count: 3, skill: 0.46 },
@@ -190,8 +174,7 @@ export const MISSIONS = [
     brief: 'A relief fleet is trapped between two hostile air groups. Keep your carrier afloat and open a safe lane through the fighting.',
     env: 'sea',
     reward: 13200,
-    needsCarrier: true,
-    requires: ['m_intercept'],
+    friendlyCarrier: 'stock_carrier',
     enemies: [
       { stock: 'stock_falcon', count: 4, skill: 0.56 },
       { stock: 'stock_goliath', count: 2, skill: 0.5 },
@@ -205,8 +188,6 @@ export const MISSIONS = [
     brief: 'A desert offensive has overrun three forward strips. Fly low through the dust front and destroy the aircraft covering the advance.',
     env: 'dusk',
     reward: 11800,
-    needsCarrier: false,
-    requires: ['m_intercept'],
     enemies: [
       { stock: 'stock_falcon', count: 5, skill: 0.54 },
       { stock: 'stock_goliath', count: 1, skill: 0.58 },
@@ -220,9 +201,7 @@ export const MISSIONS = [
     brief: 'An enemy carrier group is cutting the ocean supply chain. Find the flagship in open water, fight through its combat patrol, and sink it.',
     env: 'sea',
     reward: 19400,
-    needsCarrier: false,
     enemyCarrier: 'stock_carrier',
-    requires: ['m_escort'],
     enemies: [
       { stock: 'stock_falcon', count: 4, skill: 0.62 },
       { stock: 'stock_goliath', count: 2, skill: 0.6 },
@@ -236,8 +215,6 @@ export const MISSIONS = [
     brief: 'Mountain passes are the last route into an encircled city. Survive repeated attacks while command pushes transports through the high corridor.',
     env: 'day',
     reward: 16800,
-    needsCarrier: false,
-    requires: ['m_aceduel'],
     enemies: [
       { stock: 'stock_falcon', count: 4, skill: 0.63 },
       { stock: 'stock_fortress', count: 2, skill: 0.58 },
@@ -251,8 +228,7 @@ export const MISSIONS = [
     brief: 'The separate wars have merged into one coordinated offensive. Global Command is committing every available squadron to stop the chain reaction.',
     env: 'night',
     reward: 32000,
-    needsCarrier: true,
-    requires: ['m_gauntlet', 'm_pacific_spear', 'm_skybridge'],
+    friendlyCarrier: 'stock_carrier',
     enemies: [
       { stock: 'stock_falcon', count: 5, skill: 0.72 },
       { stock: 'stock_fortress', count: 3, skill: 0.7 },
@@ -267,9 +243,8 @@ export const MISSIONS = [
     brief: 'The enemy commits their reserve to one last push. Defend your carrier against a full air wing AND their flagship carrier. Win this and the war is yours.',
     env: 'sea',
     reward: 40000,
-    needsCarrier: true,
+    friendlyCarrier: 'stock_carrier',
     enemyCarrier: 'stock_carrier',
-    requires: ['m_gauntlet'],
     enemies: [
       { stock: 'stock_falcon', count: 4, skill: 0.7 },
       { stock: 'stock_falcon', count: 4, skill: 0.7 },
@@ -300,7 +275,7 @@ const dom = {};              // cached header nodes for cheap refreshes
 //  helpers
 // ---------------------------------------------------------------------------
 function hideOtherScreens(){
-  for (const id of ['screen-menu', 'screen-creative', 'screen-pvp', 'screen-hangar']){
+  for (const id of ['screen-menu', 'screen-creative', 'screen-mission-planner', 'screen-pvp', 'screen-hangar']){
     const n = $(id); if (n) n.classList.add('hidden');
   }
   const hud = $('hud'); if (hud) hud.classList.add('hidden');
@@ -370,8 +345,8 @@ export const Campaign = {
     c.started = true;
     save();
 
-    // FIRST-RUN ONBOARDING owns the whole screen until 'done' (intro → tutorial →
-    // carrier → plane). Returns control to the normal hub once complete.
+    // Optional first-run guidance (intro → tutorial → carrier → plane).
+    // Every panel can jump straight to the World Map without completing it.
     if (c.onboard !== 'done'){ if (moneyOff){ moneyOff(); moneyOff = null; } renderOnboarding(); return; }
 
     ensureStarterHangar();
@@ -429,6 +404,9 @@ function onboardPanel(eyebrow, title, bodyHTML, cta, fn, opts = {}){
   b.innerHTML = bodyHTML; card.appendChild(b);
   const row = el('div', 'row'); row.style.cssText = 'margin-top:28px;justify-content:flex-end;gap:10px;align-items:center;';
   if (opts.note){ const n = el('div', 'muted small', opts.note); n.style.marginRight = 'auto'; row.appendChild(n); }
+  const skip = el('button', 'btn ghost', 'Go to World Map');
+  skip.onclick = () => { sfx('click'); setOnboard('done'); curTab = 'missions'; Campaign.show(); };
+  row.appendChild(skip);
   const go = el('button', 'btn accent', cta); go.style.cssText = 'font-size:15px;padding:11px 24px;';
   go.onclick = () => { sfx('click'); fn(); };
   row.appendChild(go);
@@ -453,8 +431,8 @@ function onboardIntro(){
   const pages = [
     { eyebrow: 'Global Force Command · 06:00', title: 'The world is on fire',
       body: `Cadet — several wars have erupted across the globe at once. Global Force has been formed to move pilots, carriers and aircraft wherever a front breaks open.<br><br>You've been issued a <b>Falcon</b> — a clean single-seat interceptor — and a place in the worldwide response wing. Every sortie can send you to a different country.` },
-    { eyebrow: 'Global Force Command · 06:02', title: 'First, prove you can fly',
-      body: `Before Global Force trusts you with a live task, you'll fly a <b>training intercept</b>: one lone <b>target drone</b>, low-grade AI. Splash it and the Earth operations map opens.<br><br>Command will then stake you a <b>carrier</b> of your own design and an operating budget for a home-built fighter. From there, the worldwide wars pay their own way.` },
+    { eyebrow: 'Global Force Command · 06:02', title: 'Optional flight training',
+      body: `You can head straight to the <b>World Map</b> and choose any live task, or practise with a <b>training intercept</b>: one lone <b>target drone</b>, low-grade AI.<br><br>The guided setup also helps you build a <b>carrier</b> and a home-built fighter. Neither training nor owning a carrier is required to fly a mission — Command supplies carrier support when needed.` },
   ];
   let i = 0;
   const render = () => {
@@ -1139,7 +1117,7 @@ function renderCarrierTab(){
     const scrap = el('button', 'btn small danger', 'Decommission');
     scrap.onclick = () => {
       const refund = Math.round(s.cost * 0.4);
-      confirmModal('Decommission carrier?', 'You recover ' + fmtCr(refund) + ' (40%). Carrier missions will be locked until you build a new one.', () => {
+      confirmModal('Decommission carrier?', 'You recover ' + fmtCr(refund) + ' (40%). Command will provide a support carrier for capital-ship missions until you build a new one.', () => {
         State.campaign.carrierId = null; earn(refund); save(); sfx('ui');
         toast('Carrier decommissioned (+' + fmtCr(refund) + ')', 'good'); selectTab('carrier');
       }, 'Decommission', 'danger');
@@ -1149,7 +1127,7 @@ function renderCarrierTab(){
     left.appendChild(card);
   } else {
     left.appendChild(el('div', 'muted',
-      'No carrier commissioned. A carrier is a large airframe that serves as your mobile base in carrier missions (Escort, Decisive Engagement).'));
+      'No carrier commissioned. Command provides a support carrier for capital-ship missions, or you can build your own mobile base here.'));
   }
   wrap.appendChild(left);
 
@@ -1221,8 +1199,10 @@ function openDesignCarrier(existing){
 // ---------------------------------------------------------------------------
 //  TAB 4 — MISSIONS  (the deploy loop)
 // ---------------------------------------------------------------------------
-function missionUnlocked(m){
-  return (m.requires || []).every(r => State.campaign.completed.includes(r));
+function carrierForMission(mission){
+  if (!mission.friendlyCarrier) return null;
+  const owned = State.campaign.carrierId ? designForOwnedId(State.campaign.carrierId) : null;
+  return owned || stockGet(mission.friendlyCarrier);
 }
 
 // ===========================================================================
@@ -1286,13 +1266,12 @@ function ensureRegions(){
   for (const r of GLOBAL_LOCATIONS){ if (!c.regions[r.id]) c.regions[r.id] = { control: r.start }; }
 }
 function regionCtrl(id){ ensureRegions(); return State.campaign.regions[id] ? State.campaign.regions[id].control : 0; }
-function regionAccessible(r){ const m = missionById(r.missions[0]); return !!m && missionUnlocked(m); }
 function ctrlColor(v){ return v >= OPEN_AT ? '#5fd0ff' : v >= 28 ? '#e0b14a' : '#d9534f'; }
 
 function patrolFor(r){
   return {
     id: 'patrol_' + r.id, title: r.country + ' Air Patrol', patrol: true, env: r.env,
-    reward: 1200 + r.tier * 700, requires: [], needsCarrier: false,
+    reward: 1200 + r.tier * 700,
     enemies: [{ stock: 'stock_falcon', count: Math.min(6, 1 + r.tier), skill: Math.min(0.85, 0.34 + r.tier * 0.09) }],
     objective: { type: 'deathmatch', label: 'Clear the airspace over ' + r.country }, timeLimit: 0,
     brief: 'Global Command has a repeatable patrol over ' + r.site + '. Sweep the sector and shift local control in our favour.',
@@ -1341,14 +1320,14 @@ function worldMapSVG(regions){
   }
   s += '</g>';
   for (const r of regions){
-    const m = missionById(r.missions[0]), v = regionCtrl(r.id), col = ctrlColor(v), acc = regionAccessible(r), rad = 10 + r.tier;
-    s += `<g data-region="${r.id}" class="operation-pin${acc ? '' : ' locked'}" tabindex="0" role="button" aria-label="Operation ${r.operation}, ${m.title}, ${r.country}">`;
+    const m = missionById(r.missions[0]), v = regionCtrl(r.id), col = ctrlColor(v), rad = 10 + r.tier;
+    s += `<g data-region="${r.id}" class="operation-pin" tabindex="0" role="button" aria-label="Operation ${r.operation}, ${m.title}, ${r.country}">`;
     s += `<title>OP ${String(r.operation).padStart(2, '0')} · ${m.title} · ${r.country}</title>`;
     s += `<circle class="operation-pulse" cx="${r.x}" cy="${r.y}" r="${rad + 8}" fill="${frontFor(r.front).color}"/>`;
     s += `<circle cx="${r.x}" cy="${r.y}" r="${rad}" fill="${col}" stroke="#06101a" stroke-width="3" filter="url(#pinGlow)"/>`;
     s += `<text x="${r.x}" y="${r.y + 4}" text-anchor="middle" class="operation-number">${r.operation}</text>`;
     s += `<text x="${r.x}" y="${r.y + rad + 17}" text-anchor="middle" class="operation-country">${r.country}</text>`;
-    s += `<text x="${r.x}" y="${r.y + rad + 30}" text-anchor="middle" class="operation-status">${acc ? (v >= SECURE ? 'SECURED' : v + '%') : 'LOCKED'}</text>`;
+    s += `<text x="${r.x}" y="${r.y + rad + 30}" text-anchor="middle" class="operation-status">${v >= SECURE ? 'SECURED' : v + '%'}</text>`;
     s += '</g>';
   }
   s += '</svg>';
@@ -1357,13 +1336,10 @@ function worldMapSVG(regions){
 
 function contractRow(region, m, isPatrol){
   const done = !isPatrol && State.campaign.completed.includes(m.id);
-  const unlocked = isPatrol || missionUnlocked(m);
   const row = el('div', 'card global-contract');
-  if (!unlocked) row.classList.add('locked');
   const t = el('div', 'row'); const nm = el('div'); nm.style.cssText = 'font-weight:700;'; nm.textContent = m.title; t.appendChild(nm);
   t.appendChild(el('div', 'spacer'));
   if (done) t.appendChild(el('div', 'tag', '✔'));
-  else if (!unlocked) t.appendChild(el('div', 'tag', 'LOCKED'));
   const rew = el('div', 'tag'); rew.style.color = 'var(--gold)';
   rew.textContent = '+' + fmtCr(isPatrol ? m.reward : (done ? Math.round(m.reward * 0.4) : m.reward));
   t.appendChild(rew); row.appendChild(t);
@@ -1371,14 +1347,9 @@ function contractRow(region, m, isPatrol){
   const threat = (m.enemies || []).reduce((a, e) => a + e.count, 0);
   row.appendChild(el('div', 'mono small faint', 'Threat: ' + threat + ' aircraft' + (m.enemyCarrier ? ' + carrier' : '') + (isPatrol ? '  ·  repeatable' : '')));
   const act = el('div', 'row'); act.style.marginTop = '10px';
-  const go = el('button', 'btn accent', !unlocked ? 'Campaign prerequisite locked' : (isPatrol ? '➤ Fly Patrol' : (done ? '↻ Fly Again' : '➤ Deploy')));
-  go.disabled = !unlocked;
-  if (unlocked) go.onclick = () => openDeploy({ ...m, _regionId: region.id, country: region.country, site: region.site, front: frontFor(region.front).name });
+  const go = el('button', 'btn accent', isPatrol ? '➤ Fly Patrol' : (done ? '↻ Fly Again' : '➤ Deploy'));
+  go.onclick = () => openDeploy({ ...m, _regionId: region.id, country: region.country, site: region.site, front: frontFor(region.front).name });
   act.appendChild(go); row.appendChild(act);
-  if (!unlocked){
-    const need = (m.requires || []).filter(id => !State.campaign.completed.includes(id)).map(id => missionById(id)?.title || id);
-    row.appendChild(el('div', 'small mono warn', 'Complete first: ' + need.join(', ')));
-  }
   return row;
 }
 
@@ -1423,7 +1394,7 @@ function renderWorldMap(){
   lg.innerHTML = '<span style="color:#d9534f">● Enemy-held</span><span style="color:#e0b14a">● Contested</span><span style="color:#5fd0ff">● Global Force</span><span>Mission locations reroute each day</span>';
   mapPanel.appendChild(lg); wrap.appendChild(mapPanel);
   const detail = el('div', 'panel global-operation-detail');
-  const r = regions.find(x => x.id === curRegion) || regions.find(x => regionAccessible(x)) || regions[0];
+  const r = regions.find(x => x.id === curRegion) || regions[0];
   curRegion = r ? r.id : null; renderRegionDetail(detail, r); wrap.appendChild(detail);
   dom.body.appendChild(wrap);
 }
@@ -1438,7 +1409,6 @@ function renderMissionsTab(){
 
 function missionCard(m){
   const done = State.campaign.completed.includes(m.id);
-  const unlocked = missionUnlocked(m);
   const card = el('div', 'card');
   if (done) card.style.opacity = '0.85';
 
@@ -1448,14 +1418,12 @@ function missionCard(m){
   head.appendChild(title);
   head.appendChild(el('div', 'spacer'));
   if (done) head.appendChild(el('div', 'tag', '✔ Complete'));
-  else if (!unlocked) head.appendChild(el('div', 'tag', '🔒 Locked'));
   card.appendChild(head);
 
   // env + reward tags
   const tags = el('div', 'row'); tags.style.marginTop = '6px';
   tags.appendChild(el('div', 'tag', m.env));
-  if (m.needsCarrier) tags.appendChild(el('div', 'tag', 'needs carrier'));
-  if (m.soloOnly) tags.appendChild(el('div', 'tag', 'solo'));
+  if (m.friendlyCarrier) tags.appendChild(el('div', 'tag', 'friendly carrier'));
   if (m.enemyCarrier) tags.appendChild(el('div', 'tag', 'enemy carrier'));
   const rew = el('div', 'tag'); rew.style.color = 'var(--gold)';
   rew.textContent = '+' + fmtCr(m.reward);
@@ -1476,18 +1444,9 @@ function missionCard(m){
   en.textContent = 'Threat: ' + enemyTotal + ' aircraft' + (m.enemyCarrier ? ' + carrier' : '');
   card.appendChild(en);
 
-  // prerequisites note when locked
-  if (!unlocked){
-    const need = (m.requires || []).map(r => missionById(r)?.title || r).join(', ');
-    const note = el('div', 'small'); note.style.cssText = 'margin-top:8px;color:var(--warn)';
-    note.textContent = 'Requires: ' + need;
-    card.appendChild(note);
-  }
-
   // deploy / replay
   const acts = el('div', 'row'); acts.style.marginTop = '12px';
   const deploy = el('button', 'btn ' + (done ? '' : 'accent'), done ? '↻ Fly Again' : '➤ Deploy');
-  deploy.disabled = !unlocked;
   deploy.onclick = () => openDeploy(m);
   acts.appendChild(deploy);
   card.appendChild(acts);
@@ -1501,14 +1460,6 @@ function missionCard(m){
 function openDeploy(mission){
   const owned = ownedDesigns();
   if (owned.length === 0){ toast('Buy an aircraft before deploying', 'warn'); selectTab('hangar'); return; }
-
-  // carrier gate
-  if (mission.needsCarrier && !State.campaign.carrierId){
-    confirmModal('Carrier required',
-      'This mission needs your aircraft carrier. Commission one first in the Carrier tab.',
-      () => { selectTab('carrier'); }, 'Go to Carrier');
-    return;
-  }
 
   const m = openModal('Deploy — ' + mission.title, true);
 
@@ -1540,13 +1491,10 @@ function openDeploy(mission){
   }
   m.body.appendChild(acGrid);
 
-  // ---- wingmen picker (disabled for solo missions) ----
+  // ---- wingmen picker (available for every mission) ----
   const wingmen = State.campaign.wingmen || [];
   const selectedWing = new Set();
-  if (mission.soloOnly){
-    m.body.appendChild(el('h3', '', 'Wingmen'));
-    m.body.appendChild(el('div', 'small warn', 'This is a solo duel — no wingmen permitted.'));
-  } else if (wingmen.length){
+  if (wingmen.length){
     m.body.appendChild(el('h3', '', 'Wingmen (deploy with you)'));
     const wGrid = el('div', 'pill-row');
     for (const wm of wingmen){
@@ -1568,13 +1516,14 @@ function openDeploy(mission){
   }
 
   // ---- carrier note ----
-  if (mission.needsCarrier || mission.enemyCarrier){
+  if (mission.friendlyCarrier || mission.enemyCarrier){
     m.body.appendChild(el('h3', '', 'Capital ships'));
     const cn = el('div', 'small mono muted');
     const lines = [];
-    if (mission.needsCarrier){
-      const cv = designForOwnedId(State.campaign.carrierId);
-      lines.push('Friendly: ' + (cv ? cv.name : 'your carrier'));
+    if (mission.friendlyCarrier){
+      const cv = carrierForMission(mission);
+      const ownsCarrier = State.campaign.carrierId && designForOwnedId(State.campaign.carrierId);
+      lines.push('Friendly: ' + (cv ? cv.name : 'support carrier') + (ownsCarrier ? '' : ' (Command support)'));
     }
     if (mission.enemyCarrier){
       const ec = stockGet(mission.enemyCarrier);
@@ -1590,7 +1539,7 @@ function openDeploy(mission){
   launch.onclick = () => {
     if (!statsOf(chosen).ok){ toast('Your aircraft will not fly', 'bad'); return; }
     closeModal();
-    launchMission(mission, chosen, mission.soloOnly ? [] : [...selectedWing]);
+    launchMission(mission, chosen, [...selectedWing]);
   };
   m.body.appendChild(launch);
 }
@@ -1619,8 +1568,7 @@ function launchMission(mission, playerDesign, wingmanIds){
   }).filter(e => e.design);
 
   // carriers
-  const carrier = mission.needsCarrier && State.campaign.carrierId
-    ? designForOwnedId(State.campaign.carrierId) : null;
+  const carrier = carrierForMission(mission);
   const enemyCarrier = mission.enemyCarrier ? stockGet(mission.enemyCarrier) : null;
 
   // hand the battle a copy of the player's aircraft so combat damage never
@@ -1736,19 +1684,6 @@ function showResultModal(mission, result, info){
       ') — regroup and try again.</div>';
   }
   m.body.appendChild(eco);
-
-  // unlocks teaser
-  if (win && info.firstClear){
-    const unlocked = MISSIONS.filter(x =>
-      !State.campaign.completed.includes(x.id) &&
-      (x.requires || []).includes(mission.id) &&
-      missionUnlocked(x));
-    if (unlocked.length){
-      const u = el('div', 'small'); u.style.cssText = 'margin-top:12px;color:var(--accent)';
-      u.textContent = 'New mission unlocked: ' + unlocked.map(x => x.title).join(', ');
-      m.body.appendChild(u);
-    }
-  }
 
   const row = el('div', 'row'); row.style.marginTop = '16px';
   const again = el('button', 'btn', '↻ Fly Again');

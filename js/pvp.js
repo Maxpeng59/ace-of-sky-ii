@@ -29,7 +29,7 @@ import { Battle } from './battle.js';
 import { Menu } from './menu.js';
 
 const ROOT_ID = 'screen-pvp';
-const SCREEN_IDS = ['screen-menu', 'screen-creative', 'screen-campaign', 'screen-pvp', 'screen-hangar'];
+const SCREEN_IDS = ['screen-menu', 'screen-creative', 'screen-mission-planner', 'screen-campaign', 'screen-pvp', 'screen-hangar'];
 const RELAY_KEY = 'aceofsky2.relayUrl';
 
 // ---- module-scoped session state (one PvP session at a time) ---------------

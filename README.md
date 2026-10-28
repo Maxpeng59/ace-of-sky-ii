@@ -7,7 +7,8 @@
 ## Modes
 
 - **Creative** — free-form skirmish. Pick a jet, set the enemies and environment, place both forces on a tactical map, and launch instantly. The chosen centers control real aircraft, ship, and carrier spawns.
-- **Campaign** — earn credits, buy aircraft & wingmen, fly missions, climb the ranks.
+- **Mission Planner** — choose allowed enemy aircraft and generate a seeded extreme operation across 12 theatres and 10 task templates. Every selected aircraft appears in a random-sized elite task group; the play code reproduces and shares the complete mission.
+- **Campaign** — earn credits, buy aircraft & wingmen, fly missions, climb the ranks. All missions are available without prerequisites or loadout restrictions; Command supplies carrier support if you do not own one. First-run training/setup can be skipped with **Go to World Map**.
 - **PvP** — budget-build a fleet and dogfight another human over a relay (see below).
 
 ## Controls
