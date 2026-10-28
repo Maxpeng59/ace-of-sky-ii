@@ -588,7 +588,7 @@ function buildModeButtons(){
     'accent', () => { exitMenu(); Creative.show(); },
   ));
   wrap.appendChild(modeBtn(
-    'MISSION PLANNER', 'Select allowed enemy aircraft, generate an extreme random operation, and share its play code.',
+    'MISSION PLANNER', 'Select enemy aircraft from your saved creations, generate an extreme random operation, and share its portable play code.',
     'danger', () => { exitMenu(); MissionPlanner.show(); },
   ));
   wrap.appendChild(modeBtn(
