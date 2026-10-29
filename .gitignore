@@ -7,3 +7,6 @@
 # Python relay bytecode
 __pycache__/
 *.pyc
+
+# Separate Sites checkout for the official hosted multiplayer relay
+multiplayer-relay/

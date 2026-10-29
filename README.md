@@ -9,7 +9,7 @@
 - **Creative** — free-form skirmish. Pick a jet, set the enemies and environment, place both forces on a tactical map, and launch instantly. The chosen centers control real aircraft, ship, and carrier spawns.
 - **Mission Planner** — select flight-ready enemy aircraft from your saved creation library and generate a seeded extreme operation across 12 theatres and 10 task templates. Every selected custom blueprint appears in a random-sized elite task group; the portable play code carries the aircraft designs and reproduces the complete mission on another device.
 - **Campaign** — earn credits, buy aircraft & wingmen, fly missions, climb the ranks. All missions are available without prerequisites or loadout restrictions; Command supplies carrier support if you do not own one. First-run training/setup can be skipped with **Go to World Map**.
-- **PvP** — budget-build a fleet and dogfight another human over a relay (see below).
+- **PvP Online** — use Quick Duel or budget-build a fleet, create a room, share its six-character code, and dogfight another human through the official HTTPS relay.
 
 ## Controls
 
@@ -36,21 +36,23 @@ python3 serve.py 8126
 
 ## Human-vs-human PvP
 
-PvP uses a small **store-and-forward relay** (`server/relay.py`) — both browsers talk to the relay, which mailboxes messages per room. There is no direct peer connection.
+Public PvP works out of the box through the official always-on HTTPS relay at **https://ace-of-sky-ii-relay.jimpeng.chatgpt.site**. Both players open the public game, choose **PVP ONLINE**, select **Quick Duel** or build a fleet, then one creates a room and shares the six-character code with the other. No server setup or pasted URL is required.
+
+The game uses a store-and-forward relay: both browsers send real-time state and combat events to room mailboxes rather than making a direct peer connection. Rooms expire automatically. The public relay persists room and mailbox state in D1 so it remains usable across backend instances.
+
+For local development or a private LAN, the dependency-free Python reference relay is still available:
 
 ```bash
 python3 server/relay.py        # starts the relay (default port 8787)
 ```
 
-In the PvP lobby, paste the relay's address, then one player **hosts** a room and the other **joins** with the room code.
-
-**Playing over the internet:** the hosted game at the link above is served over HTTPS, so the relay must also be reachable over **HTTPS** (browsers block an HTTPS page from calling an HTTP relay). Options: deploy `relay.py` to any small always-on host that gives you HTTPS (a free PaaS, a VPS, or a tunnel like `cloudflared`), then paste that URL. For same-machine / LAN testing, run the local dev server (`serve.py`) over plain HTTP and use the `localhost:8787` relay.
+Open **Advanced: use a custom development relay** in PvP and enter `http://localhost:8787`. Browsers block an HTTPS game from calling an HTTP development relay, so use the local `serve.py` game for that path.
 
 ## Tech
 
 - Vanilla ES modules, no bundler. `index.html` loads `js/main.js`; an import map points `three` at `vendor/three.module.js`.
 - Rendering: Three.js (WebGL). Physics, AI, and all gameplay are hand-rolled in `js/`.
-- The relay (`server/relay.py`) is dependency-free Python (standard library only).
+- The official relay is a Sites full-stack app backed by D1; `server/relay.py` remains a dependency-free local reference implementation.
 
 ## Layout
 
@@ -59,6 +61,6 @@ index.html          entry point (import map + screens)
 js/                 game code (engine, physics, ai, battle, hangar, parts, pvp, net, …)
 css/                styles
 vendor/             Three.js + a couple of loaders
-server/relay.py     PvP relay (run separately)
+server/relay.py     Optional local-development PvP relay
 serve.py            local static dev server
 ```

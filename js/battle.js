@@ -540,6 +540,7 @@ class Sim {
     // netplay
     this.net = config.net || null;
     this.netAccum = 0;
+    this.netFleetAccum = 0;
     this.netRemoteState = null;     // latest received transform
     this.netSpawned = false;
     this.fireEvents = [];           // queued local fire events to send
@@ -3136,7 +3137,10 @@ class Sim {
   onNetMsg(msg){
     if (!msg) return;
     if (msg.t === 'fleet' && !this.netSpawned){
-      this.spawnRemoteFleet(msg.fleet || []);
+      // Ignore delayed lobby fleet messages (`codes`). Only the battle
+      // handshake carries `fleet`; spawning an empty list would permanently
+      // suppress the real remote aircraft when it arrives a moment later.
+      if (Array.isArray(msg.fleet) && msg.fleet.length) this.spawnRemoteFleet(msg.fleet);
     } else if (msg.t === 'state'){
       this.netRemoteState = msg;     // {pos, quat, vel, throttle, t}
     } else if (msg.t === 'fire'){
@@ -3188,6 +3192,14 @@ class Sim {
 
   netSend(dt){
     if (!this.net || !this.player) return;
+    // The two browsers do not enter Battle on the exact same frame. Repeat the
+    // fleet handshake until we have received the peer's fleet so an early
+    // announcement cannot be consumed by the still-visible lobby.
+    this.netFleetAccum += dt;
+    if (!this.netSpawned && this.netFleetAccum >= 1){
+      this.netFleetAccum = 0;
+      this.sendFleet();
+    }
     this.netAccum += dt;
     if (this.netAccum < 0.05) return;     // ~20 Hz state stream
     this.netAccum = 0;

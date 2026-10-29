@@ -29,7 +29,8 @@ const SEND_MS = Math.round(1000 / SEND_HZ);
 const PEER_TIMEOUT_MS = 9000;        // no peer traffic this long -> consider it dropped
 const FAIL_LIMIT = 25;               // consecutive network failures before giving up
 
-const DEFAULT_URL = 'http://localhost:8787';
+export const OFFICIAL_RELAY_URL = 'https://ace-of-sky-ii-relay.jimpeng.chatgpt.site';
+const DEFAULT_URL = OFFICIAL_RELAY_URL;
 
 // normalise a base url (strip trailing slash)
 function cleanUrl(u){

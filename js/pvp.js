@@ -23,7 +23,7 @@
 // ============================================================================
 import { $, el, clear, show, hide, toast, sfx, fmtCr, fmtTime, clamp } from './util.js';
 import { State, newDesign, cloneDesign, exportCode, importCode, statsOf, save } from './core.js';
-import { connect, createRoom, joinRoom, checkHealth } from './net.js';
+import { connect, createRoom, joinRoom, checkHealth, OFFICIAL_RELAY_URL } from './net.js';
 import { Hangar } from './hangar.js';
 import { Battle } from './battle.js';
 import { Menu } from './menu.js';
@@ -32,11 +32,20 @@ const ROOT_ID = 'screen-pvp';
 const SCREEN_IDS = ['screen-menu', 'screen-creative', 'screen-mission-planner', 'screen-campaign', 'screen-pvp', 'screen-hangar'];
 const RELAY_KEY = 'aceofsky2.relayUrl';
 
+function initialRelayUrl(){
+  const saved = (localStorage.getItem(RELAY_KEY) || '').trim();
+  // Existing players may have the old development default persisted. Migrate
+  // it automatically so public PvP works without asking them to clear storage.
+  if (!saved || /^https?:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/i.test(saved)) return OFFICIAL_RELAY_URL;
+  return saved;
+}
+
 // ---- module-scoped session state (one PvP session at a time) ---------------
 let root = null;
 let session = null;     // see makeSession()
 let designTimer = null; // setInterval handle for the design countdown
 let net = null;         // live transport from net.connect()
+let battleSubs = new Set(); // Battle subscribers once the lobby becomes a match
 let teardownFns = [];   // listeners to remove on exit
 
 function makeSession(){
@@ -47,7 +56,7 @@ function makeSession(){
     remaining: State.pvp.designSeconds || 300,
     fleet: [],                               // array of AircraftDesign (mine)
     locked: false,                           // fleet frozen?
-    relayUrl: localStorage.getItem(RELAY_KEY) || 'http://localhost:8787',
+    relayUrl: initialRelayUrl(),
     role: null,                              // 'host' | 'client'
     room: '',
     connected: false,
@@ -86,6 +95,8 @@ function cleanupSession(){
   if (net){ try { net.close(); } catch (e){} net = null; }
   for (const fn of teardownFns){ try { fn(); } catch (e){} }
   teardownFns = [];
+  battleSubs.clear();
+  matchStarting = false;
   session = null;
 }
 
@@ -94,6 +105,68 @@ function fleetCost(fleet){
   let c = 0;
   for (const d of fleet){ try { c += statsOf(d).cost; } catch (e){} }
   return c;
+}
+
+function isOfficialRelay(){
+  return session && session.relayUrl.replace(/\/$/, '') === OFFICIAL_RELAY_URL;
+}
+
+function quickDuelDesign(){
+  return (State.library || []).find(d => {
+    if (!d || d.role === 'ship' || d.role === 'carrier' || d.role === 'cruiser' || d.isCarrier) return false;
+    try { return !!statsOf(d).ok; } catch (e){ return false; }
+  }) || null;
+}
+
+function addRelayStatus(container){
+  const card = el('div', 'card');
+  card.style.marginTop = '14px';
+  const row = el('div', 'row');
+  row.appendChild(el('b', '', isOfficialRelay() ? 'Official internet relay' : 'Custom relay'));
+  row.appendChild(el('div', 'spacer'));
+  const state = el('span', 'small mono', 'CHECKING…');
+  state.style.color = 'var(--warn)';
+  row.appendChild(state);
+  card.appendChild(row);
+  card.appendChild(el('div', 'small muted', isOfficialRelay()
+    ? 'Always-on HTTPS service · no setup required · room codes expire automatically.'
+    : session.relayUrl));
+  container.appendChild(card);
+  const checkedUrl = session.relayUrl;
+  checkHealth(checkedUrl).then(ok => {
+    if (!state.isConnected || !session || session.relayUrl !== checkedUrl) return;
+    state.textContent = ok ? 'ONLINE' : 'UNREACHABLE';
+    state.style.color = ok ? 'var(--good)' : 'var(--bad)';
+  });
+}
+
+function addAdvancedRelayControls(container){
+  const details = el('details');
+  details.style.marginTop = '12px';
+  const summary = el('summary', 'small muted', 'Advanced: use a custom development relay');
+  summary.style.cursor = 'pointer';
+  details.appendChild(summary);
+  const field = el('label', 'field'); field.style.marginTop = '10px';
+  field.appendChild(el('span', '', 'Custom relay URL'));
+  const input = el('input'); input.type = 'url'; input.value = session.relayUrl; input.placeholder = 'http://localhost:8787';
+  input.style.width = '100%';
+  input.onchange = () => {
+    session.relayUrl = input.value.trim() || OFFICIAL_RELAY_URL;
+    localStorage.setItem(RELAY_KEY, session.relayUrl);
+    renderPhase();
+  };
+  field.appendChild(input); details.appendChild(field);
+  if (!isOfficialRelay()){
+    const reset = el('button', 'btn small', 'USE OFFICIAL RELAY');
+    reset.style.marginTop = '8px';
+    reset.onclick = () => {
+      session.relayUrl = OFFICIAL_RELAY_URL;
+      localStorage.setItem(RELAY_KEY, OFFICIAL_RELAY_URL);
+      renderPhase();
+    };
+    details.appendChild(reset);
+  }
+  container.appendChild(details);
 }
 
 // ---------------------------------------------------------------------------
@@ -126,8 +199,25 @@ function renderSetup(){
   const eyebrow = el('div', 'eyebrow', 'MULTIPLAYER · HUMAN vs HUMAN');
   const h1 = el('h1', 'title', 'PvP DUEL');
   h1.style.fontSize = '48px';
-  const sub = el('div', 'subtitle', 'Design a fleet within a budget, connect over the relay, and fight a real opponent.');
+  const sub = el('div', 'subtitle', 'Create a room, share its code, and fight a real opponent online.');
   wrap.appendChild(eyebrow); wrap.appendChild(h1); wrap.appendChild(sub);
+
+  const quickDesign = quickDuelDesign();
+  const quick = el('div', 'panel');
+  quick.style.cssText = 'margin-top:22px;border-color:var(--good);';
+  quick.appendChild(el('h2', '', 'Quick Online Duel'));
+  quick.appendChild(el('div', 'small muted', quickDesign
+    ? 'Skip fleet construction and enter the official lobby with your first flight-ready saved aircraft.'
+    : 'Save at least one flight-ready aircraft in your Library to use Quick Duel.'));
+  const quickBtn = el('button', 'btn accent big', quickDesign ? 'QUICK DUEL · USE ' + quickDesign.name : 'NO FLIGHT-READY AIRCRAFT');
+  quickBtn.style.marginTop = '14px'; quickBtn.disabled = !quickDesign;
+  quickBtn.onclick = () => {
+    session.fleet = [cloneDesign(quickDesign, '')];
+    lockFleet('Quick Duel fleet ready');
+  };
+  quick.appendChild(quickBtn);
+  addRelayStatus(quick);
+  wrap.appendChild(quick);
 
   const panel = el('div', 'panel');
   panel.style.marginTop = '22px';
@@ -176,23 +266,7 @@ function renderSetup(){
   tField.appendChild(tRow);
   panel.appendChild(tField);
 
-  // relay url
-  const rField = el('label', 'field');
-  rField.style.marginTop = '14px';
-  rField.appendChild(el('span', '', 'Relay server URL (run server/relay.py, then paste its address)'));
-  const rInput = el('input');
-  rInput.type = 'text'; rInput.value = session.relayUrl; rInput.placeholder = 'http://localhost:8787';
-  rInput.style.width = '100%';
-  rInput.oninput = () => { session.relayUrl = rInput.value.trim(); };
-  rField.appendChild(rInput);
-  panel.appendChild(rField);
-
-  // help note
-  const note = el('div', 'small muted');
-  note.style.marginTop = '12px';
-  note.innerHTML = 'Start the relay with <span class="kbd">python3 server/relay.py</span>. ' +
-    'On a LAN, player&nbsp;2 uses the host machine\'s IP (printed by the server). For internet play, tunnel the port (ngrok/cloudflared).';
-  panel.appendChild(note);
+  addAdvancedRelayControls(panel);
 
   // start design phase
   const actions = el('div', 'row');
@@ -496,24 +570,18 @@ function renderLobby(){
   conn.appendChild(el('h2', '', 'Connection'));
 
   if (!session.connected){
-    // relay url
-    const rField = el('label', 'field');
-    rField.appendChild(el('span', '', 'Relay URL'));
-    const rInput = el('input'); rInput.type = 'text'; rInput.value = session.relayUrl; rInput.style.width = '100%';
-    rInput.oninput = () => { session.relayUrl = rInput.value.trim(); };
-    rField.appendChild(rInput);
-    conn.appendChild(rField);
+    addRelayStatus(conn);
 
     const btnRow = el('div', 'row'); btnRow.style.marginTop = '14px';
-    const hostBtn = el('button', 'btn accent', '⌂ CREATE ROOM (HOST)');
+    const hostBtn = el('button', 'btn accent', '⌂ CREATE ONLINE ROOM');
     hostBtn.onclick = () => doHost();
     btnRow.appendChild(hostBtn);
     conn.appendChild(btnRow);
 
     const joinField = el('label', 'field'); joinField.style.marginTop = '14px';
-    joinField.appendChild(el('span', '', 'or join by code'));
+    joinField.appendChild(el('span', '', 'Join with room code'));
     const jrow = el('div', 'row');
-    const jInput = el('input'); jInput.type = 'text'; jInput.placeholder = 'CODE'; jInput.maxLength = 8;
+    const jInput = el('input'); jInput.type = 'text'; jInput.placeholder = 'ABC234'; jInput.maxLength = 6;
     jInput.style.width = '120px'; jInput.style.textTransform = 'uppercase'; jInput.style.fontFamily = 'var(--mono)';
     const joinBtn = el('button', 'btn', 'JOIN');
     joinBtn.onclick = () => doJoin((jInput.value || '').trim().toUpperCase());
@@ -522,13 +590,14 @@ function renderLobby(){
     joinField.appendChild(jrow);
     conn.appendChild(joinField);
 
-    const health = el('button', 'btn small ghost', 'Test relay');
+    const health = el('button', 'btn small ghost', 'CHECK ONLINE SERVICE');
     health.style.marginTop = '12px';
     health.onclick = async () => {
       const ok = await checkHealth(session.relayUrl);
-      toast(ok ? 'Relay reachable ✔' : 'Relay not reachable ✕', ok ? 'good' : 'bad');
+      toast(ok ? 'Online service reachable ✔' : 'Online service unreachable ✕', ok ? 'good' : 'bad');
     };
     conn.appendChild(health);
+    addAdvancedRelayControls(conn);
   } else {
     // connected — show room + role + peer status
     const roomLine = el('div', 'topbar'); roomLine.style.marginBottom = '12px';
@@ -670,20 +739,35 @@ function startLiveNet(){
     url: session.relayUrl,
     room: session.room,
     role: session.role,
-    onState: () => {},     // no state frames in the lobby
-    onEvent: onLobbyMsg,
-    onPeer: onPeerChange,
+    onState: (m) => {
+      if (session && session.phase === 'match') dispatchBattleMsg(m);
+    },
+    onEvent: (m) => {
+      if (session && session.phase === 'match') dispatchBattleMsg(m);
+      else onLobbyMsg(m);
+    },
+    onPeer: (info) => {
+      if (session && session.phase === 'match'){
+        if (info && info.timedOut) dispatchBattleMsg({ t: 'event', kind: 'peerTimeout' });
+      } else onPeerChange(info);
+    },
     onClose: (reason) => {
       if (session && session.phase === 'lobby'){
         session.connected = false; session.peerJoined = false; session.peerReady = false;
         session.status = 'Disconnected: ' + reason;
         toast('Connection lost: ' + reason, 'bad');
         renderPhase();
+      } else if (session && session.phase === 'match'){
+        dispatchBattleMsg({ t: 'event', kind: 'netClose', reason });
       }
     },
   });
   // announce ourselves + send fleet immediately so a peer already present gets it
   sendHello();
+}
+
+function dispatchBattleMsg(msg){
+  for (const cb of battleSubs){ try { cb(msg); } catch (e){} }
 }
 
 function sendHello(){
@@ -722,6 +806,10 @@ function onLobbyMsg(msg){
     return;
   }
   if (msg.t === 'fleet'){
+    // Battle uses the same message type with a `fleet` payload. It can arrive
+    // during the 600 ms lobby-to-match transition; do not let it erase the
+    // already exchanged lobby `codes` payload.
+    if (!Array.isArray(msg.codes)) return;
     session.peerFleetCodes = Array.isArray(msg.codes) ? msg.codes : [];
     session.peerFleetMeta = Array.isArray(msg.meta) ? msg.meta : session.peerFleetCodes.map(() => ({ name: 'Aircraft', cost: 0 }));
     session.peerJoined = true;
@@ -792,7 +880,7 @@ function startMatch(){
   //   net: { role, send(msg), onMsg(cb), close() }
   // Battle pushes its own 'state'/'event' messages through send and subscribes
   // via onMsg; we route incoming through a single dispatcher.
-  const battleSubs = new Set();
+  battleSubs.clear();
   const battleNet = {
     role: session.role,
     send: (m) => { if (net) net.send(m); },
@@ -803,23 +891,8 @@ function startMatch(){
     peerFleetCodes: session.peerFleetCodes.slice(),
   };
 
-  // re-point the live transport's callbacks at the battle dispatcher
-  if (net){ try { net.close(); } catch (e){} net = null; }
-  net = connect({
-    url: session.relayUrl,
-    room: session.room,
-    role: session.role,
-    onState: (m) => { for (const cb of battleSubs) try { cb(m); } catch (e){} },
-    onEvent: (m) => {
-      if (m && m.t === 'bye'){ toast('Opponent disconnected', 'warn'); }
-      for (const cb of battleSubs) try { cb(m); } catch (e){}
-    },
-    onPeer: (info) => {
-      if (info && info.timedOut){ for (const cb of battleSubs) try { cb({ t: 'event', kind: 'peerTimeout' }); } catch (e){} }
-    },
-    onClose: (reason) => { for (const cb of battleSubs) try { cb({ t: 'event', kind: 'netClose', reason }); } catch (e){} },
-  });
-  battleNet.send = (m) => { if (net) net.send(m); };
+  // Keep the exact same live transport used by the lobby. Closing it here
+  // would send a `bye` beacon and disconnect the opponent during launch.
 
   // hide our screen; Battle owns #hud and the GL view from here
   hide(root);

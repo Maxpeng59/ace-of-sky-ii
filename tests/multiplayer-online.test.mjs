@@ -1,0 +1,46 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { checkHealth, createRoom, joinRoom, OFFICIAL_RELAY_URL } from '../js/net.js';
+
+assert.equal(OFFICIAL_RELAY_URL, 'https://ace-of-sky-ii-relay.jimpeng.chatgpt.site');
+assert.ok(OFFICIAL_RELAY_URL.startsWith('https://'), 'the public game must use an HTTPS relay');
+
+const requests = [];
+globalThis.fetch = async (url, options = {}) => {
+  requests.push({ url: String(url), method: options.method || 'GET' });
+  const path = new URL(String(url)).pathname;
+  const body = path === '/room'
+    ? { ok: true, room: 'ABC234' }
+    : path === '/join'
+      ? { ok: true, room: 'ABC234', peers: ['host', 'client'] }
+      : { ok: true, service: 'Ace of Sky II official multiplayer relay' };
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+};
+
+assert.equal((await createRoom()).room, 'ABC234');
+assert.deepEqual((await joinRoom(undefined, 'abc234')).peers, ['host', 'client']);
+assert.equal(await checkHealth(), true);
+assert.deepEqual(requests, [
+  { url: OFFICIAL_RELAY_URL + '/room', method: 'POST' },
+  { url: OFFICIAL_RELAY_URL + '/join', method: 'POST' },
+  { url: OFFICIAL_RELAY_URL + '/health', method: 'GET' },
+]);
+
+const pvpSource = fs.readFileSync(new URL('../js/pvp.js', import.meta.url), 'utf8');
+const battleSource = fs.readFileSync(new URL('../js/battle.js', import.meta.url), 'utf8');
+assert.match(pvpSource, /QUICK DUEL/);
+assert.match(pvpSource, /CREATE ONLINE ROOM/);
+assert.match(pvpSource, /Keep the exact same live transport used by the lobby/,
+  'match launch must preserve the lobby transport instead of sending a bye beacon');
+assert.match(pvpSource, /if \(!Array\.isArray\(msg\.codes\)\) return;/,
+  'an early battle fleet message must not erase the lobby fleet during launch');
+assert.doesNotMatch(pvpSource, /run server\/relay\.py, then paste its address/);
+assert.match(battleSource, /if \(!this\.netSpawned && this\.netFleetAccum >= 1\)/,
+  'the fleet handshake must repeat until both battle clients have spawned their opponent');
+assert.match(battleSource, /Array\.isArray\(msg\.fleet\) && msg\.fleet\.length/,
+  'delayed lobby messages must not spawn an empty battle fleet');
+
+console.log('multiplayer-online tests passed');

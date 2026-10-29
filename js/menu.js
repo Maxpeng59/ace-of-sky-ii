@@ -596,7 +596,7 @@ function buildModeButtons(){
     'gold', () => { exitMenu(); Campaign.show(); },
   ));
   wrap.appendChild(modeBtn(
-    'PVP', 'Budget-build a fleet and dogfight another human over the relay.',
+    'PVP ONLINE', 'Create a room, share its code, and dogfight another human through the official internet service.',
     '', () => { exitMenu(); Pvp.show(); },
   ));
 
