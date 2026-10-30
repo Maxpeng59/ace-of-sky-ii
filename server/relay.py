@@ -1,10 +1,10 @@
 # ============================================================================
 #  Ace of Sky II — relay.py
 #  A tiny, dependency-FREE (Python standard library only) HTTP relay server
-#  that lets two browsers play human-vs-human PvP without any direct P2P
+#  that lets up to ten browsers play human-vs-human PvP without any direct P2P
 #  connection. It is a "store-and-forward" mailbox: each player POSTs messages
-#  and the OTHER player picks them up on the next poll. No game logic lives
-#  here — it just shuttles opaque JSON between the two sides of a room.
+#  and every OTHER player picks them up on the next poll. No game logic lives
+#  here — it just shuttles opaque JSON between the pilots in a room.
 #
 #  ---------------------------------------------------------------------------
 #  HOW TO RUN
@@ -15,15 +15,15 @@
 #  The game's net.js client talks to it over plain HTTP with these endpoints
 #  (all responses are JSON, CORS is wide-open '*' so the browser can reach it):
 #
-#    POST /room                      -> { ok, room }           create a room, get a code
-#    POST /join     {room}           -> { ok, room, peers }    join an existing room
-#    POST /msg      {room,from,data} -> { ok }                 enqueue `data` for the OTHER player
-#    GET  /poll?room=<>&from=<>      -> { ok, messages:[...] } drain THIS player's mailbox
+#    POST /room     {maxPlayers}     -> { ok, room, playerId } create a room, get a code
+#    POST /join     {room}           -> { ok, room, playerId } claim the next open slot
+#    POST /msg      {room,from,data} -> { ok }                 broadcast `data` to the others
+#    GET  /poll?room=<>&player=<>    -> { ok, messages:[...] } drain THIS player's mailbox
+#    POST /leave    {room,player}    -> { ok }                 release a player slot
 #    GET  /health                    -> { ok, rooms, uptime }  liveness probe
 #
-#  `from` is the player's role: "host" or "client". A message POSTed by the
-#  host is delivered to the client's mailbox and vice-versa. Each mailbox keeps
-#  at most MAX_QUEUE messages (old state frames are disposable, so we drop the
+#  `from` is the player's id: "host", "p2", ... "p10". Each mailbox keeps at
+#  most MAX_QUEUE messages (old state frames are disposable, so we drop the
 #  oldest). Idle rooms are reaped after ROOM_TTL seconds.
 #
 #  ---------------------------------------------------------------------------
@@ -36,7 +36,7 @@
 #        ngrok http 8787            -> use the https URL it prints
 #        cloudflared tunnel --url http://localhost:8787
 #      then both players point net.js at that public URL.
-#  There is no built-in TLS or auth — it is meant for friendly LAN/tunnel duels,
+#  There is no built-in TLS or auth — it is meant for friendly LAN/tunnel games,
 #  not a public service.
 # ============================================================================
 
@@ -53,19 +53,21 @@ from urllib.parse import urlparse, parse_qs
 # ---- tuning knobs ----------------------------------------------------------
 MAX_QUEUE = 240          # per-player mailbox cap (drop oldest beyond this)
 ROOM_TTL  = 600.0        # seconds of inactivity before a room is reaped
-ROOM_CODE_LEN = 4        # length of the human-typed room code
+ROOM_CODE_LEN = 6        # length of the human-typed room code
+MAX_PLAYERS = 10
 START_TIME = time.time()
 
 # ---- shared room store (guarded by a lock) ---------------------------------
 #   rooms[code] = {
 #       'created': ts, 'touched': ts,
-#       'peers': set('host'/'client'),
-#       'box': { 'host': [msg,...], 'client': [msg,...] }   # mailboxes
+#       'max_players': 10,
+#       'peers': set('host'/'p2'/.../'p10'),
+#       'box': { player_id: [msg,...] }   # mailboxes
 #   }
 _rooms = {}
 _lock = threading.Lock()
 
-ROLES = ('host', 'client')
+ROLES = ('host',) + tuple('p%d' % n for n in range(2, MAX_PLAYERS + 1))
 
 
 def _now():
@@ -90,8 +92,23 @@ def _reap_locked():
     return len(stale)
 
 
-def _other(role):
-    return 'client' if role == 'host' else 'host'
+def _role_key(role):
+    return 1 if role == 'host' else int(role[1:])
+
+
+def _clamp_players(value):
+    try:
+        return max(2, min(MAX_PLAYERS, int(value)))
+    except (TypeError, ValueError):
+        return MAX_PLAYERS
+
+
+def _wrap_message(message, sender):
+    if isinstance(message, dict):
+        wrapped = dict(message)
+        wrapped['_from'] = sender
+        return wrapped
+    return message
 
 
 class RelayHandler(BaseHTTPRequestHandler):
@@ -150,13 +167,14 @@ class RelayHandler(BaseHTTPRequestHandler):
         if path == '/health':
             with _lock:
                 self._json({'ok': True, 'rooms': len(_rooms),
-                            'uptime': round(_now() - START_TIME, 1)})
+                            'uptime': round(_now() - START_TIME, 1),
+                            'version': 2, 'maxPlayers': MAX_PLAYERS})
             return
         if path == '/poll':
             q = parse_qs(parsed.query)
             room = (q.get('room', [''])[0] or '').upper()
-            frm = (q.get('from', [''])[0] or '')
-            if frm not in ROLES:
+            player = (q.get('player', q.get('from', ['']))[0] or '')
+            if player not in ROLES:
                 self._json({'ok': False, 'error': 'bad role'}, 400)
                 return
             with _lock:
@@ -165,11 +183,15 @@ class RelayHandler(BaseHTTPRequestHandler):
                 if not r:
                     self._json({'ok': False, 'error': 'no such room', 'gone': True}, 404)
                     return
+                if player not in r['peers']:
+                    self._json({'ok': False, 'error': 'player not in room', 'gone': True}, 404)
+                    return
                 r['touched'] = _now()
-                msgs = r['box'][frm]
-                r['box'][frm] = []           # drain the mailbox
-                peers = sorted(r['peers'])
-            self._json({'ok': True, 'messages': msgs, 'peers': peers})
+                msgs = r['box'][player]
+                r['box'][player] = []           # drain the mailbox
+                peers = sorted(r['peers'], key=_role_key)
+            self._json({'ok': True, 'messages': msgs, 'peers': peers,
+                        'maxPlayers': r['max_players']})
             return
         # unknown GET
         self._json({'ok': False, 'error': 'not found'}, 404)
@@ -180,16 +202,20 @@ class RelayHandler(BaseHTTPRequestHandler):
         path = parsed.path
 
         if path == '/room':
+            data = self._read_body()
+            max_players = _clamp_players(data.get('maxPlayers', MAX_PLAYERS))
             with _lock:
                 _reap_locked()
                 code = _gen_code()
                 ts = _now()
                 _rooms[code] = {
                     'created': ts, 'touched': ts,
+                    'max_players': max_players,
                     'peers': {'host'},
-                    'box': {'host': [], 'client': []},
+                    'box': {role: [] for role in ROLES},
                 }
-            self._json({'ok': True, 'room': code})
+            self._json({'ok': True, 'room': code, 'playerId': 'host',
+                        'peers': ['host'], 'maxPlayers': max_players})
             return
 
         if path == '/join':
@@ -201,10 +227,18 @@ class RelayHandler(BaseHTTPRequestHandler):
                 if not r:
                     self._json({'ok': False, 'error': 'no such room'}, 404)
                     return
-                r['peers'].add('client')
+                open_roles = [role for role in ROLES[1:r['max_players']]
+                              if role not in r['peers']]
+                if not open_roles:
+                    self._json({'ok': False, 'error': 'room full'}, 409)
+                    return
+                player = open_roles[0]
+                r['box'][player] = []
+                r['peers'].add(player)
                 r['touched'] = _now()
-                peers = sorted(r['peers'])
-            self._json({'ok': True, 'room': room, 'peers': peers})
+                peers = sorted(r['peers'], key=_role_key)
+            self._json({'ok': True, 'room': room, 'playerId': player,
+                        'peers': peers, 'maxPlayers': r['max_players']})
             return
 
         if path == '/msg':
@@ -221,16 +255,37 @@ class RelayHandler(BaseHTTPRequestHandler):
                 if not r:
                     self._json({'ok': False, 'error': 'no such room', 'gone': True}, 404)
                     return
+                if frm not in r['peers']:
+                    self._json({'ok': False, 'error': 'player not in room'}, 403)
+                    return
                 r['touched'] = _now()
-                box = r['box'][_other(frm)]      # deliver to the OTHER player
-                # support a batched array of messages or a single message
-                if isinstance(payload, list):
-                    box.extend(payload)
-                elif payload is not None:
-                    box.append(payload)
-                # cap the mailbox: state frames are disposable, drop the oldest
-                if len(box) > MAX_QUEUE:
-                    del box[0:len(box) - MAX_QUEUE]
+                messages = payload if isinstance(payload, list) else [payload]
+                messages = [_wrap_message(msg, frm) for msg in messages if msg is not None]
+                for player in r['peers']:
+                    if player == frm:
+                        continue
+                    box = r['box'][player]
+                    box.extend(messages)
+                    if len(box) > MAX_QUEUE:
+                        del box[0:len(box) - MAX_QUEUE]
+            self._json({'ok': True})
+            return
+
+        if path == '/leave':
+            data = self._read_body()
+            room = (str(data.get('room', '')) or '').upper()
+            player = str(data.get('player', ''))
+            with _lock:
+                r = _rooms.get(room)
+                if not r:
+                    self._json({'ok': True, 'gone': True})
+                    return
+                if player == 'host':
+                    del _rooms[room]
+                elif player in r['peers']:
+                    r['peers'].remove(player)
+                    r['box'][player] = []
+                    r['touched'] = _now()
             self._json({'ok': True})
             return
 
@@ -258,10 +313,10 @@ def _banner(port):
     print('  ACE OF SKY II — PvP relay server is UP')
     print(line)
     print('  Local:   http://localhost:%d' % port)
-    print('  LAN:     http://%s:%d   (give this to player 2 on the same Wi-Fi)' % (ip, port))
+    print('  LAN:     http://%s:%d   (share this with players on the same Wi-Fi)' % (ip, port))
     print('')
     print('  In the game PvP lobby, set the relay URL to one of the above,')
-    print('  then HOST creates a room and CLIENT joins with the 4-letter code.')
+    print('  then HOST creates a room and up to nine others join the 6-letter code.')
     print('')
     print('  Internet play: tunnel this port and share the public URL, e.g.')
     print('     ngrok http %d' % port)

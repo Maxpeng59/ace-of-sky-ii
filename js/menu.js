@@ -22,7 +22,7 @@ import { Music } from './music.js';
 import { Creative } from './creative.js';
 import { MissionPlanner } from './mission-planner.js';
 import { Campaign } from './campaign.js';
-import { Pvp } from './pvp.js';
+import { Pvp } from './pvp.js?v=20261030-10p';
 import { Hangar } from './hangar.js';
 
 // ---------------------------------------------------------------------------

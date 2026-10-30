@@ -18,7 +18,7 @@ import {
   importCode, STOCK_DESIGNS, stockGet, uid, bus,
 } from './core.js';
 import { Hangar } from './hangar.js';
-import { Battle } from './battle.js';
+import { Battle } from './battle.js?v=20261030-10p';
 import { Menu } from './menu.js';
 
 // ---------------------------------------------------------------------------

@@ -498,6 +498,7 @@ class Sim {
     this.fx = [];             // visual effects (sparks, explosions)
     this.player = null;
     this.remote = null;       // remote human craft (netplay)
+    this.remotePlayers = new Map(); // playerId -> remote human craft
 
     this.time = 0;
     this.over = false;
@@ -542,6 +543,7 @@ class Sim {
     this.netAccum = 0;
     this.netFleetAccum = 0;
     this.netRemoteState = null;     // latest received transform
+    this.netRemoteStates = new Map();
     this.netSpawned = false;
     this.fireEvents = [];           // queued local fire events to send
 
@@ -568,6 +570,7 @@ class Sim {
     this.buildWorld();
     this.buildHUD();
     this.spawnAll();
+    if (this.net && Array.isArray(this.cfg.networkPlayers)) this.spawnNetworkPlayers(this.cfg.networkPlayers);
     this.bindInput();
     this.world.player = this.player;
     this.world.groundY = this.groundY;
@@ -585,7 +588,7 @@ class Sim {
     if (this.net){
       this.net.onMsg((msg) => this.onNetMsg(msg));
       // announce our fleet immediately and periodically until peer spawns
-      this.sendFleet();
+      if (!Array.isArray(this.cfg.networkPlayers)) this.sendFleet();
     }
 
     toast(this.objective.label || objectiveLabel(this.objective), '');
@@ -2427,7 +2430,7 @@ class Sim {
     }
     if (c.isPlayer){
       this.flashMsg(reason.toUpperCase(), 'bad');
-      this.endBattle(false, reason);
+      if (!(this.net && Array.isArray(this.cfg.networkPlayers))) this.endBattle(false, reason);
     } else if (this.lock.target && this.lock.target._src === c){   // lock holds a lockView, not the craft — compare its source
       this.lock.reset();
     }
@@ -3085,6 +3088,8 @@ class Sim {
         if (this.netSpawned && hostilesAlive === 0 && hadRemoteForce){
           this.endBattle(true, 'Enemy fleet destroyed');
         }
+        const friendliesAlive = this.craft.filter(c => c.alive && c.team === 0).length + this.carriers.filter(c => c.alive && c.team === 0).length;
+        if (this.netSpawned && friendliesAlive === 0) this.endBattle(false, 'Friendly fleet destroyed');
       } else if (hostilesAlive === 0 && (this.craft.length > 0 || this.carriers.length > 0)){
         this.endBattle(true, 'All enemies destroyed');
       }
@@ -3138,17 +3143,25 @@ class Sim {
 
   onNetMsg(msg){
     if (!msg) return;
+    const sender = String(msg._from || '');
     if (msg.t === 'fleet' && !this.netSpawned){
       // Ignore delayed lobby fleet messages (`codes`). Only the battle
       // handshake carries `fleet`; spawning an empty list would permanently
       // suppress the real remote aircraft when it arrives a moment later.
       if (Array.isArray(msg.fleet) && msg.fleet.length) this.spawnRemoteFleet(msg.fleet);
     } else if (msg.t === 'state'){
-      this.netRemoteState = msg;     // {pos, quat, vel, throttle, t}
+      if (sender && this.remotePlayers.size) this.netRemoteStates.set(sender, msg);
+      else this.netRemoteState = msg;     // {pos, quat, vel, throttle, t}
     } else if (msg.t === 'fire'){
-      this.applyRemoteFire(msg);
+      this.applyRemoteFire(msg, sender);
+    } else if (msg.t === 'roster' && Array.isArray(msg.peers)){
+      for (const [id, c] of this.remotePlayers){
+        if (!msg.peers.includes(id) && c.alive) this.killCraft(c, 'Disconnected', this.player);
+      }
     } else if (msg.t === 'bye'){
-      this.endBattle(true, 'Opponent disconnected');
+      const c = this.remotePlayers.get(sender);
+      if (c && c.alive) this.killCraft(c, 'Disconnected', this.player);
+      else if (!this.remotePlayers.size) this.endBattle(true, 'Opponent disconnected');
     }
   }
 
@@ -3179,8 +3192,33 @@ class Sim {
     toast('Opponent fleet engaged', 'warn');
   }
 
-  applyRemoteFire(msg){
-    const c = this.remote; if (!c || !c.alive) return;
+  spawnNetworkPlayers(players){
+    this.netSpawned = true;
+    const teamCounts = [0, 0];
+    for (const entry of players){
+      if (!entry || !entry.id || !entry.design) continue;
+      const team = entry.team === 0 ? 0 : 1;
+      const idx = teamCounts[team]++;
+      const side = idx % 2 ? 1 : -1;
+      const rank = Math.floor(idx / 2) + 1;
+      const vessel = !!(entry.design.isCarrier || entry.design.role === 'carrier' || entry.design.role === 'ship' || entry.design.role === 'cruiser');
+      const pos = new THREE.Vector3(side * (90 + rank * 70), vessel ? 0 : 360 + rank * 18, team === 0 ? -600 - rank * 30 : 1400 + rank * 30);
+      const c = this.makeCraft(entry.design, team, pos, team === 0 ? 0 : Math.PI, false);
+      c.name = entry.name || entry.id;
+      c.netId = entry.id;
+      c.isRemote = true;
+      c.isAI = false;
+      if (vessel){
+        c.grounded = true; c.vel.set(0, 0, 0); c.pos.y = this.shipRestY(c); c.group.position.copy(c.pos);
+      } else this.primeAirborneCraft(c);
+      this.remotePlayers.set(entry.id, c);
+      if (!this.remote) this.remote = c;
+    }
+    toast(`${this.remotePlayers.size} network pilots engaged`, 'warn');
+  }
+
+  applyRemoteFire(msg, sender = ''){
+    const c = this.remotePlayers.get(sender) || this.remote; if (!c || !c.alive) return;
     // spawn the matching projectile from the remote craft toward msg.target/dir
     const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(c.group.quaternion);
     const muzzle = this.muzzle(c);
@@ -3209,7 +3247,7 @@ class Sim {
     // fleet handshake until we have received the peer's fleet so an early
     // announcement cannot be consumed by the still-visible lobby.
     this.netFleetAccum += dt;
-    if (!this.netSpawned && this.netFleetAccum >= 1){
+    if (!Array.isArray(this.cfg.networkPlayers) && !this.netSpawned && this.netFleetAccum >= 1){
       this.netFleetAccum = 0;
       this.sendFleet();
     }
@@ -3229,6 +3267,22 @@ class Sim {
   }
 
   netTick(dt){
+    if (this.remotePlayers.size){
+      for (const [id, c] of this.remotePlayers){
+        if (!c || !c.alive) continue;
+        const st = this.netRemoteStates.get(id);
+        if (!st) continue;
+        const tp = TMP.set(st.pos.x, st.pos.y, st.pos.z);
+        if (st.vel) tp.addScaledVector(TMP2.set(st.vel.x, st.vel.y, st.vel.z), 0.05);
+        c.pos.lerp(tp, 1 - Math.exp(-10 * dt));
+        if (st.quat){ QTMP.set(st.quat.x, st.quat.y, st.quat.z, st.quat.w); c.group.quaternion.slerp(QTMP, 1 - Math.exp(-10 * dt)); }
+        if (st.vel) c.vel.set(st.vel.x, st.vel.y, st.vel.z);
+        c.group.position.copy(c.pos);
+        if (Number.isFinite(st.hp)) c.hp = Math.max(0, Math.min(c.maxHp, st.hp * c.maxHp));
+        if (st.alive === false && c.alive) this.killCraft(c, 'Shot down', this.player);
+      }
+      return;
+    }
     // interpolate the remote human craft toward last received transform
     const c = this.remote;
     if (!c || !c.alive) return;

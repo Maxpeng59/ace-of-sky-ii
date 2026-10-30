@@ -12,20 +12,19 @@
 //                 FLEET; total spent is tracked against the budget. At 0 (or on
 //                 "LOCK FLEET") the fleet is frozen.
 //    3. LOBBY   — connect to the relay (net.connect). HOST creates a room and
-//                 reads out the code; CLIENT joins by code. Each side exchanges
-//                 its fleet as exportCode() strings and flags readiness.
-//    4. MATCH   — when BOTH are ready, Battle.start({ player:lead, allies:rest,
-//                 enemies:[], net:{role,send,onMsg,close}, objective:{type:'pvp'},
-//                 onEnd }). The enemy fleet is spawned from the peer's codes and
-//                 driven by the remote human via net.
+//                 reads out the code; up to nine more pilots join by code. Every
+//                 pilot exchanges one exportCode() aircraft and flags readiness.
+//    4. MATCH   — when the full lobby is ready, Battle.start receives every
+//                 network pilot. Their aircraft are driven by remote humans via
+//                 net rather than by AI wingmen.
 //
 //  Public API (FROZEN): export const Pvp = { show() }.  BACK -> Menu.show().
 // ============================================================================
 import { $, el, clear, show, hide, toast, sfx, fmtCr, fmtTime, clamp } from './util.js';
 import { State, newDesign, cloneDesign, exportCode, importCode, statsOf, save } from './core.js';
-import { connect, createRoom, joinRoom, checkHealth, OFFICIAL_RELAY_URL } from './net.js';
+import { connect, createRoom, joinRoom, checkHealth, OFFICIAL_RELAY_URL } from './net.js?v=20261030-10p';
 import { Hangar } from './hangar.js';
-import { Battle } from './battle.js';
+import { Battle } from './battle.js?v=20261030-10p';
 import { Menu } from './menu.js';
 import {
   crazyGamesGameplayStart, crazyGamesGameplayStop, crazyGamesInviteLink, crazyGamesUsername,
@@ -36,10 +35,10 @@ const ROOT_ID = 'screen-pvp';
 const SCREEN_IDS = ['screen-menu', 'screen-creative', 'screen-mission-planner', 'screen-campaign', 'screen-pvp', 'screen-hangar'];
 const RELAY_KEY = 'aceofsky2.relayUrl';
 const PVP_MODES = [
-  { id: 'duel', label: '1V1', size: 1, domain: 'air', env: 'day', budget: 40000 },
-  { id: 'squad3', label: '3V3', size: 3, domain: 'air', env: 'day', budget: 90000 },
-  { id: 'squad5', label: '5V5', size: 5, domain: 'air', env: 'day', budget: 150000 },
-  { id: 'ocean', label: 'OCEANIC BATTLE', size: 3, domain: 'naval', env: 'sea', budget: 150000 },
+  { id: 'duel', label: '1V1', size: 1, maxPlayers: 2, domain: 'air', env: 'day', budget: 40000 },
+  { id: 'squad3', label: '3V3', size: 3, maxPlayers: 6, domain: 'air', env: 'day', budget: 50000 },
+  { id: 'squad5', label: '5V5', size: 5, maxPlayers: 10, domain: 'air', env: 'day', budget: 50000 },
+  { id: 'ocean', label: 'OCEANIC BATTLE', size: 3, maxPlayers: 6, domain: 'naval', env: 'sea', budget: 70000 },
 ];
 
 function initialRelayUrl(){
@@ -73,6 +72,9 @@ function makeSession(){
     peerName: 'Opponent',
     relayUrl: initialRelayUrl(),
     role: null,                              // 'host' | 'client'
+    playerId: '',                            // host | p2 ... p10
+    peers: [],                               // live room roster
+    players: {},                             // playerId -> lobby profile/fleet/ready
     room: '',
     connected: false,
     peerJoined: false,
@@ -110,7 +112,7 @@ function openFromPlatform(params = {}){
   Pvp.show();
   const design = quickDuelDesign();
   if (!design){ toast('No compatible saved unit for ' + modeDef().label, 'bad'); return; }
-  session.fleet = Array.from({ length: modeDef().size }, () => cloneDesign(design, ''));
+  session.fleet = [cloneDesign(design, '')];
   lockFleet(modeDef().label + ' ready');
   const room = String(params.room || '').trim().toUpperCase();
   if (/^[A-HJ-NP-Z2-9]{6}$/.test(room)) void doJoin(room);
@@ -145,6 +147,16 @@ function modeDef(id = session && session.mode){
   return PVP_MODES.find(m => m.id === id) || PVP_MODES[0];
 }
 
+function fleetSlots(){ return 1; }
+
+function playerSlot(id){
+  if (id === 'host') return 0;
+  const m = /^p(\d+)$/.exec(String(id || ''));
+  return m ? Math.max(1, Number(m[1]) - 1) : 99;
+}
+
+function playerTeam(id){ return playerSlot(id) % 2; }
+
 function isVessel(d){
   return !!(d && (d.isCarrier || d.role === 'carrier' || d.role === 'ship' || d.role === 'cruiser'));
 }
@@ -157,7 +169,7 @@ function modeAllowsDesign(d, mode = modeDef()){
 }
 
 function fleetModeError(fleet, mode = modeDef()){
-  if (!Array.isArray(fleet) || fleet.length !== mode.size) return `This mode requires exactly ${mode.size} ${mode.domain === 'naval' ? 'vessels' : 'aircraft'}.`;
+  if (!Array.isArray(fleet) || fleet.length !== fleetSlots()) return `Choose exactly one ${mode.domain === 'naval' ? 'vessel' : 'aircraft'} for ${mode.label}.`;
   if (fleet.some(d => !modeAllowsDesign(d, mode))) return mode.domain === 'naval' ? 'Oceanic Battle accepts ships, cruisers, and carriers only.' : 'This mode accepts flight-ready aircraft only.';
   return '';
 }
@@ -277,10 +289,10 @@ function renderSetup(){
   quick.style.cssText = 'margin-top:14px;border-color:var(--good);';
   quick.appendChild(el('h2', '', 'Quick Start'));
   const unitWord = mode.domain === 'naval' ? 'VESSEL' : 'AIRCRAFT';
-  const quickBtn = el('button', 'btn accent big', quickDesign ? `USE ${quickDesign.name} ×${mode.size}` : `NO READY ${unitWord}`);
+  const quickBtn = el('button', 'btn accent big', quickDesign ? `PILOT ${quickDesign.name}` : `NO READY ${unitWord}`);
   quickBtn.style.marginTop = '14px'; quickBtn.disabled = !quickDesign;
   quickBtn.onclick = () => {
-    session.fleet = Array.from({ length: mode.size }, () => cloneDesign(quickDesign, ''));
+    session.fleet = [cloneDesign(quickDesign, '')];
     lockFleet(mode.label + ' ready');
   };
   quick.appendChild(quickBtn);
@@ -289,7 +301,7 @@ function renderSetup(){
 
   const panel = el('div', 'panel');
   panel.style.marginTop = '22px';
-  panel.appendChild(el('h2', '', 'Custom Fleet'));
+  panel.appendChild(el('h2', '', 'Custom Aircraft'));
 
   // budget control
   const bField = el('label', 'field');
@@ -448,10 +460,10 @@ function renderDesign(){
   const hrow = el('div', 'row');
   hrow.style.marginBottom = '8px';
   const mode = modeDef();
-  hrow.appendChild(el('h2', '', `Your ${mode.label} Fleet (${session.fleet.length}/${mode.size})`));
+  hrow.appendChild(el('h2', '', `Your ${mode.label} Unit (${session.fleet.length}/${fleetSlots()})`));
   const hsp = el('div', 'spacer'); hrow.appendChild(hsp);
   const newBtn = el('button', 'btn accent', mode.domain === 'naval' ? '✚ NEW VESSEL' : '✚ NEW AIRCRAFT');
-  newBtn.disabled = session.fleet.length >= mode.size;
+  newBtn.disabled = session.fleet.length >= fleetSlots();
   newBtn.onclick = () => openDesignEditor(null);
   hrow.appendChild(newBtn);
   const impBtn = el('button', 'btn', '⇩ IMPORT CODE');
@@ -464,7 +476,7 @@ function renderDesign(){
   if (session.fleet.length === 0){
     const empty = el('div', 'panel');
     empty.style.textAlign = 'center'; empty.style.color = 'var(--ink-dim)';
-    empty.textContent = `Add ${mode.size} ${mode.domain === 'naval' ? 'vessels' : 'aircraft'}.`;
+    empty.textContent = `Choose one ${mode.domain === 'naval' ? 'vessel' : 'aircraft'} to pilot.`;
     list.appendChild(empty);
   } else {
     session.fleet.forEach((d, i) => list.appendChild(fleetRow(d, i)));
@@ -513,7 +525,7 @@ function fleetRow(d, i){
   edit.onclick = () => openDesignEditor(i);
   row.appendChild(edit);
   const dup = el('button', 'btn small', 'DUP');
-  dup.disabled = session.fleet.length >= modeDef().size;
+  dup.disabled = session.fleet.length >= fleetSlots();
   dup.onclick = () => { session.fleet.splice(i + 1, 0, cloneDesign(d)); sfx('click'); renderPhase(); };
   row.appendChild(dup);
   const exp = el('button', 'btn small', 'CODE');
@@ -535,7 +547,7 @@ function fleetRow(d, i){
 // enforcing the remaining-budget as the hangar's budget bar.
 function openDesignEditor(index){
   const isNew = index == null;
-  if (isNew && session.fleet.length >= modeDef().size){ toast('Fleet is full', 'warn'); return; }
+  if (isNew && session.fleet.length >= fleetSlots()){ toast('Your pilot slot is full', 'warn'); return; }
   const base = isNew ? newDesign('Fleet ' + (session.fleet.length + 1)) : session.fleet[index];
   const editing = cloneDesign(base, '');         // edit a clone; commit on exit
   editing.id = base.id;                           // keep id stable for in-place save
@@ -563,7 +575,7 @@ function openDesignEditor(index){
 
 function commitDesign(index, design, stats){
   if (!session) return;
-  if (index == null && session.fleet.length >= modeDef().size){ toast('Fleet is full', 'warn'); return; }
+  if (index == null && session.fleet.length >= fleetSlots()){ toast('Your pilot slot is full', 'warn'); return; }
   // validate vs budget for the whole fleet
   const others = session.fleet.filter((_, i) => i !== index);
   const cost = stats ? stats.cost : fleetCost([design]);
@@ -591,7 +603,7 @@ function exportDesignPrompt(d){
   sfx('click');
 }
 function importDesignPrompt(){
-  if (session.fleet.length >= modeDef().size){ toast('Fleet is full', 'warn'); return; }
+  if (session.fleet.length >= fleetSlots()){ toast('Your pilot slot is full', 'warn'); return; }
   showCodeModal('Paste an ASK2 design code', '', true, (code) => {
     const d = importCode(code);
     if (!d){ toast('Invalid design code', 'bad'); return; }
@@ -632,8 +644,8 @@ function renderLobby(){
   back.onclick = () => {
     if (net){ try { net.close(); } catch (e){} net = null; }
     leaveCrazyGamesRoom();
-    session.connected = false; session.peerJoined = false; session.peerReady = false; session.myReady = false;
-    session.role = null; session.room = ''; session.peerMode = null;
+    session.connected = false; session.myReady = false;
+    session.role = null; session.playerId = ''; session.room = ''; session.peers = []; session.players = {};
     startDesignTimer();
     session.phase = 'design'; renderPhase();
   };
@@ -675,18 +687,18 @@ function renderLobby(){
 
     addAdvancedRelayControls(conn);
   } else {
-    // connected — show room + role + peer status
+    // connected — show room and live ten-player roster
     const roomLine = el('div', 'topbar'); roomLine.style.marginBottom = '12px';
-    roomLine.appendChild(el('span', '', session.role === 'host' ? 'HOSTING' : 'JOINED'));
+    roomLine.appendChild(el('span', '', session.playerId === 'host' ? 'HOSTING' : 'JOINED'));
     const codePill = el('span', 'pill');
     codePill.appendChild(el('span', 'muted', 'ROOM '));
     const codeVal = el('span', 'mono', session.room);
     codeVal.style.fontSize = '18px'; codeVal.style.letterSpacing = '.2em'; codeVal.style.color = 'var(--gold)';
     codePill.appendChild(codeVal);
     roomLine.appendChild(codePill);
-    if (session.role === 'host'){
+    if (session.playerId === 'host'){
       const copy = el('button', 'btn small', 'COPY');
-      copy.onclick = () => { copyText(session.room); toast('Code copied — give it to your opponent', 'good'); };
+      copy.onclick = () => { copyText(session.room); toast('Code copied — invite your squad', 'good'); };
       roomLine.appendChild(copy);
       const invite = el('button', 'btn small accent', 'COPY INVITE LINK');
       invite.onclick = async () => {
@@ -698,22 +710,19 @@ function renderLobby(){
     }
     conn.appendChild(roomLine);
 
-    // peer presence
-    const peerBox = el('div', 'card');
-    peerBox.appendChild(statusDot(session.peerName || 'Opponent', session.peerJoined, session.peerJoined ? 'connected' : 'waiting…'));
-    conn.appendChild(peerBox);
-
-    const me = el('div', 'card'); me.style.marginTop = '10px';
-    me.appendChild(statusDot(session.playerName || 'You', true, session.myReady ? 'READY' : 'not ready'));
-    conn.appendChild(me);
+    const count = session.peers.length;
+    const countCard = el('div', 'card');
+    countCard.appendChild(statusDot(`${count}/${modeDef().maxPlayers} PILOTS`, count === modeDef().maxPlayers,
+      count === modeDef().maxPlayers ? 'lobby full' : `${modeDef().maxPlayers - count} slots open`));
+    conn.appendChild(countCard);
 
     const drop = el('button', 'btn small danger'); drop.textContent = 'Leave room';
     drop.style.marginTop = '12px';
     drop.onclick = () => {
       if (net){ try { net.close(); } catch (e){} net = null; }
       leaveCrazyGamesRoom();
-      session.connected = false; session.peerJoined = false; session.peerReady = false; session.myReady = false;
-      session.peerMode = null;
+      session.connected = false; session.myReady = false;
+      session.playerId = ''; session.role = null; session.peers = []; session.players = {};
       renderPhase();
     };
     conn.appendChild(drop);
@@ -724,54 +733,42 @@ function renderLobby(){
 
   // ---- right: fleets + readiness ----
   const right = el('div', 'panel');
-  right.appendChild(el('h2', '', 'Fleets'));
-
-  const mine = el('div');
-  mine.appendChild(el('h3', '', 'Your fleet (' + session.fleet.length + ') — ' + fmtCr(fleetCost(session.fleet))));
-  for (const d of session.fleet){
-    const r = el('div', 'list-row'); r.style.padding = '6px 10px';
-    const sw = el('div'); sw.style.cssText = 'width:18px;height:18px;border-radius:4px;flex:none;background:' + (d.color || '#cfd8e3');
-    r.appendChild(sw);
-    r.appendChild(el('span', '', d.name || 'Aircraft'));
-    mine.appendChild(r);
+  right.appendChild(el('h2', '', 'Pilots'));
+  const roster = session.peers.slice().sort((a, b) => playerSlot(a) - playerSlot(b));
+  for (const id of roster){
+    const p = session.players[id] || { name: id, ready: false, meta: [] };
+    const row = el('div', 'list-row'); row.style.padding = '7px 10px';
+    const team = playerTeam(id);
+    const badge = el('span', 'tag', team === 0 ? 'BLUE' : 'RED');
+    badge.style.color = team === 0 ? '#57b8ff' : '#ff6b7f';
+    row.appendChild(badge);
+    row.appendChild(el('b', '', (p.name || id) + (id === session.playerId ? ' (YOU)' : '')));
+    const craft = p.meta && p.meta[0] ? p.meta[0].name : 'choosing…';
+    row.appendChild(el('span', 'small faint', craft));
+    row.appendChild(el('div', 'spacer'));
+    const readyState = el('span', 'small mono', p.ready ? 'READY' : 'NOT READY');
+    readyState.style.color = p.ready ? 'var(--good)' : 'var(--ink-dim)';
+    row.appendChild(readyState);
+    right.appendChild(row);
   }
-  right.appendChild(mine);
-
-  const peer = el('div'); peer.style.marginTop = '12px';
-  const peerCount = session.peerFleetMeta.length;
-  peer.appendChild(el('h3', '', 'Opponent fleet (' + (peerCount || '—') + ')'));
-  if (peerCount){
-    for (const m of session.peerFleetMeta){
-      const r = el('div', 'list-row'); r.style.padding = '6px 10px';
-      r.appendChild(el('span', '', m.name || 'Aircraft'));
-      const sp = el('div', 'spacer'); r.appendChild(sp);
-      r.appendChild(el('span', 'small faint mono', fmtCr(m.cost || 0)));
-      peer.appendChild(r);
-    }
-  } else {
-    const w = el('div', 'small faint'); w.textContent = session.peerJoined ? 'Waiting for opponent to lock & send fleet…' : 'No opponent yet.';
-    peer.appendChild(w);
-  }
-  right.appendChild(peer);
 
   // readiness + launch
   if (session.connected){
-    const peerModeOk = !session.peerMode || session.peerMode === session.mode;
-    const peerFleetOk = peerModeOk && peerCount === modeDef().size;
     const ready = el('div', 'row'); ready.style.marginTop = '16px';
     const readyBtn = el('button', 'btn ' + (session.myReady ? '' : 'accent'),
       session.myReady ? '✓ READY (click to unready)' : 'I AM READY');
-    readyBtn.disabled = peerCount > 0 && !peerFleetOk;
+    readyBtn.disabled = session.fleet.length !== 1;
     readyBtn.onclick = () => toggleReady();
     ready.appendChild(readyBtn);
     right.appendChild(ready);
 
-    const both = session.myReady && session.peerReady && session.peerJoined && peerFleetOk;
+    const profiles = roster.map(id => session.players[id]).filter(Boolean);
+    const lobbyFull = roster.length === modeDef().maxPlayers;
+    const allReady = lobbyFull && profiles.length === roster.length && profiles.every(p => p.ready && p.mode === session.mode && Array.isArray(p.codes) && p.codes.length === 1);
     const status = el('div', 'small'); status.style.marginTop = '10px';
-    if (!peerModeOk) { status.style.color = 'var(--bad)'; status.textContent = `Mode mismatch: opponent selected ${modeDef(session.peerMode).label}.`; }
-    else if (peerCount > 0 && peerCount !== modeDef().size) { status.style.color = 'var(--bad)'; status.textContent = `Opponent needs ${modeDef().size} units.`; }
-    else if (both) { status.style.color = 'var(--good)'; status.textContent = 'Launching…'; }
-    else if (session.myReady && !session.peerReady) { status.style.color = 'var(--warn)'; status.textContent = 'Waiting for opponent…'; }
+    if (!lobbyFull) { status.style.color = 'var(--warn)'; status.textContent = `Waiting for ${modeDef().maxPlayers - roster.length} more pilot${modeDef().maxPlayers - roster.length === 1 ? '' : 's'}…`; }
+    else if (allReady) { status.style.color = 'var(--good)'; status.textContent = 'All pilots ready — launching…'; }
+    else if (session.myReady) { status.style.color = 'var(--warn)'; status.textContent = 'Waiting for the squad…'; }
     else { status.style.color = 'var(--ink-dim)'; status.textContent = 'Ready when set.'; }
     right.appendChild(status);
   }
@@ -799,11 +796,13 @@ function statusDot(label, on, text){
 async function doHost(){
   session.status = 'Creating room…'; renderPhase();
   localStorage.setItem(RELAY_KEY, session.relayUrl);
-  const res = await createRoom(session.relayUrl);
+  const res = await createRoom(session.relayUrl, modeDef().maxPlayers);
   if (!res.ok){ toast('Could not create room: ' + res.error, 'bad'); session.status = res.error; renderPhase(); return; }
-  session.role = 'host'; session.room = res.room;
+  session.playerId = res.playerId || 'host'; session.role = session.playerId; session.room = res.room;
+  session.peers = res.peers || [session.playerId];
+  syncSelfProfile();
   startLiveNet();
-  session.connected = true; session.status = 'Room ' + res.room + ' created. Share the code.';
+  session.connected = true; session.status = `Room ${res.room} created for ${modeDef().maxPlayers} pilots.`;
   updateCrazyGamesRoom(session.room, session.mode, true);
   toast('Room created: ' + res.room, 'good'); sfx('lockfull');
   renderPhase();
@@ -814,12 +813,13 @@ async function doJoin(code){
   localStorage.setItem(RELAY_KEY, session.relayUrl);
   const res = await joinRoom(session.relayUrl, code);
   if (!res.ok){ toast('Could not join: ' + res.error, 'bad'); session.status = res.error; renderPhase(); return; }
-  session.role = 'client'; session.room = res.room;
+  session.playerId = res.playerId || 'client'; session.role = session.playerId; session.room = res.room;
+  session.peers = res.peers || [session.playerId];
+  syncSelfProfile();
   startLiveNet();
   session.connected = true;
-  session.peerJoined = (res.peers || []).indexOf('host') >= 0;
   session.status = 'Joined room ' + res.room + '.';
-  updateCrazyGamesRoom(session.room, session.mode, false);
+  updateCrazyGamesRoom(session.room, session.mode, session.peers.length < modeDef().maxPlayers);
   toast('Joined ' + res.room, 'good'); sfx('lockfull');
   renderPhase();
 }
@@ -830,7 +830,7 @@ function startLiveNet(){
   net = connect({
     url: session.relayUrl,
     room: session.room,
-    role: session.role,
+    role: session.playerId,
     onState: (m) => {
       if (session && session.phase === 'match') dispatchBattleMsg(m);
     },
@@ -839,13 +839,12 @@ function startLiveNet(){
       else onLobbyMsg(m);
     },
     onPeer: (info) => {
-      if (session && session.phase === 'match'){
-        if (info && info.timedOut) dispatchBattleMsg({ t: 'event', kind: 'peerTimeout' });
-      } else onPeerChange(info);
+      onPeerChange(info);
+      if (session && session.phase === 'match') dispatchBattleMsg({ t: 'roster', peers: info.peers || [] });
     },
     onClose: (reason) => {
       if (session && session.phase === 'lobby'){
-        session.connected = false; session.peerJoined = false; session.peerReady = false;
+        session.connected = false;
         session.status = 'Disconnected: ' + reason;
         leaveCrazyGamesRoom();
         toast('Connection lost: ' + reason, 'bad');
@@ -865,7 +864,8 @@ function dispatchBattleMsg(msg){
 
 function sendHello(){
   if (!net) return;
-  net.send({ t: 'hello', role: session.role, mode: session.mode, name: session.playerName });
+  syncSelfProfile();
+  net.send({ t: 'hello', role: session.playerId, mode: session.mode, name: session.playerName });
   // send fleet codes + lightweight meta for the lobby display
   net.send({
     t: 'fleet',
@@ -879,28 +879,26 @@ function sendHello(){
 
 function onPeerChange(info){
   if (!session) return;
-  if (info.joined){
-    session.peerJoined = true;
-    session.status = 'Opponent connected.';
-    if (session.role === 'host') updateCrazyGamesRoom(session.room, session.mode, false);
-    // re-send our fleet so the late joiner gets it
-    sendHello();
-    if (session.phase === 'lobby') renderPhase();
-  } else if (info.timedOut){
-    session.peerJoined = false;
-    if (session.role === 'host') updateCrazyGamesRoom(session.room, session.mode, true);
-    if (session.phase === 'lobby'){ session.status = 'Opponent went quiet…'; renderPhase(); }
-  }
+  const peers = Array.isArray(info.peers) ? info.peers : session.peers;
+  session.peers = peers.slice();
+  for (const id of Object.keys(session.players)) if (!peers.includes(id)) delete session.players[id];
+  for (const id of peers) if (!session.players[id]) session.players[id] = { name: id, mode: session.mode, codes: [], meta: [], ready: false };
+  syncSelfProfile();
+  session.status = `${peers.length}/${modeDef().maxPlayers} pilots connected.`;
+  if (session.playerId === 'host') updateCrazyGamesRoom(session.room, session.mode, peers.length < modeDef().maxPlayers);
+  if (info.joined) sendHello();
+  if (session.phase === 'lobby'){ renderPhase(); maybeStartMatch(); }
 }
 
 function onLobbyMsg(msg){
   if (!session || !msg) return;
+  const sender = String(msg._from || '');
+  if (!sender || sender === session.playerId) return;
+  if (!session.players[sender]) session.players[sender] = { name: sender, mode: session.mode, codes: [], meta: [], ready: false };
+  const profile = session.players[sender];
   if (msg.t === 'hello'){
-    session.peerJoined = true;
-    if (typeof msg.name === 'string' && msg.name.trim()) session.peerName = msg.name.trim().slice(0, 32);
-    if (PVP_MODES.some(m => m.id === msg.mode)) session.peerMode = msg.mode;
-    // someone just arrived — make sure they have our fleet/ready state
-    sendHello();
+    if (typeof msg.name === 'string' && msg.name.trim()) profile.name = msg.name.trim().slice(0, 32);
+    if (PVP_MODES.some(m => m.id === msg.mode)) profile.mode = msg.mode;
     if (session.phase === 'lobby') renderPhase();
     return;
   }
@@ -909,82 +907,98 @@ function onLobbyMsg(msg){
     // during the 600 ms lobby-to-match transition; do not let it erase the
     // already exchanged lobby `codes` payload.
     if (!Array.isArray(msg.codes)) return;
-    if (PVP_MODES.some(m => m.id === msg.mode)) session.peerMode = msg.mode;
-    if (typeof msg.name === 'string' && msg.name.trim()) session.peerName = msg.name.trim().slice(0, 32);
-    session.peerFleetCodes = Array.isArray(msg.codes) ? msg.codes : [];
-    session.peerFleetMeta = Array.isArray(msg.meta) ? msg.meta : session.peerFleetCodes.map(() => ({ name: 'Aircraft', cost: 0 }));
-    session.peerJoined = true;
+    if (PVP_MODES.some(m => m.id === msg.mode)) profile.mode = msg.mode;
+    if (typeof msg.name === 'string' && msg.name.trim()) profile.name = msg.name.trim().slice(0, 32);
+    profile.codes = Array.isArray(msg.codes) ? msg.codes.slice(0, 1) : [];
+    profile.meta = Array.isArray(msg.meta) ? msg.meta.slice(0, 1) : profile.codes.map(() => ({ name: 'Aircraft', cost: 0 }));
     if (session.phase === 'lobby'){ renderPhase(); maybeStartMatch(); }
     return;
   }
   if (msg.t === 'ready'){
-    session.peerReady = !!msg.ready;
-    session.peerJoined = true;
+    profile.ready = !!msg.ready;
     if (session.phase === 'lobby'){ renderPhase(); maybeStartMatch(); }
     return;
   }
   if (msg.t === 'bye'){
-    session.peerJoined = false; session.peerReady = false;
-    if (session.role === 'host') updateCrazyGamesRoom(session.room, session.mode, true);
-    if (session.phase === 'lobby'){ session.status = 'Opponent left.'; renderPhase(); }
+    delete session.players[sender];
+    session.peers = session.peers.filter(id => id !== sender);
+    if (session.playerId === 'host') updateCrazyGamesRoom(session.room, session.mode, true);
+    if (session.phase === 'lobby'){ session.status = 'A pilot left.'; renderPhase(); }
+    return;
+  }
+  if (msg.t === 'start' && msg.mode === session.mode){
+    const players = session.peers.slice().sort((a, b) => playerSlot(a) - playerSlot(b)).map(id => ({ id, ...(session.players[id] || {}) }));
+    matchStarting = true;
+    setTimeout(() => startMatch(players), 300);
     return;
   }
 }
 
+function syncSelfProfile(){
+  if (!session || !session.playerId) return;
+  session.players[session.playerId] = {
+    id: session.playerId,
+    name: session.playerName,
+    mode: session.mode,
+    codes: session.myFleetCodes.slice(0, 1),
+    meta: session.fleet.slice(0, 1).map(d => { let c = 0; try { c = statsOf(d).cost; } catch (e){} return { name: d.name, cost: c }; }),
+    ready: session.myReady,
+  };
+  if (!session.peers.includes(session.playerId)) session.peers.push(session.playerId);
+}
+
 function toggleReady(){
   session.myReady = !session.myReady;
+  syncSelfProfile();
   if (net) net.send({ t: 'ready', ready: session.myReady });
   sfx(session.myReady ? 'lock' : 'click');
   renderPhase();
   maybeStartMatch();
 }
 
-// both ready + both fleets exchanged -> start the duel.
-// The HOST waits a beat to make sure the CLIENT also transitions (both sides
-// independently check the same condition, so both will start).
+// The host launches only when the selected mode's real-human lobby is full and
+// every pilot has supplied one compatible unit and marked ready.
 let matchStarting = false;
 function maybeStartMatch(){
   if (matchStarting || !session) return;
   if (session.phase !== 'lobby') return;
-  if (!(session.myReady && session.peerReady)) return;
-  if (!session.peerJoined) return;
-  if (!session.peerFleetCodes || session.peerFleetCodes.length === 0) return;
-  if (!session.fleet || session.fleet.length === 0) return;
-  if (session.peerMode !== session.mode) return;
-  if (session.peerFleetCodes.length !== modeDef().size) return;
+  if (session.playerId !== 'host') return;
+  const roster = session.peers.slice().sort((a, b) => playerSlot(a) - playerSlot(b));
+  if (roster.length !== modeDef().maxPlayers) return;
+  const players = roster.map(id => session.players[id]).filter(Boolean);
+  if (players.length !== roster.length) return;
+  if (!players.every(p => p.ready && p.mode === session.mode && Array.isArray(p.codes) && p.codes.length === 1)) return;
   matchStarting = true;
   session.status = 'Launching…';
-  // small delay so the final 'ready' has time to round-trip both ways
-  setTimeout(() => startMatch(), 600);
+  const snapshot = players.map((p, i) => ({ ...p, id: roster[i] }));
+  // Every client already owns the complete ready roster. Keep the launch
+  // signal tiny; embedding ten full aircraft codes can exceed relay limits.
+  if (net) net.send({ t: 'start', mode: session.mode });
+  setTimeout(() => startMatch(snapshot), 600);
 }
 
 // ===========================================================================
 //  PHASE 4 — MATCH  (hand off to Battle with a net transport)
 // ===========================================================================
-function startMatch(){
+function startMatch(snapshot = null){
   if (!session) return;
   matchStarting = false;
   session.phase = 'match';
   updateCrazyGamesRoom(session.room, session.mode, false);
   crazyGamesGameplayStart();
 
-  // build the enemy fleet from the peer's design codes (human-driven over net)
-  const enemyDesigns = [];
-  for (const code of session.peerFleetCodes){
-    const d = importCode(code);
-    if (d) enemyDesigns.push(d);
+  const list = Array.isArray(snapshot) ? snapshot : session.peers.map(id => ({ id, ...(session.players[id] || {}) }));
+  const myTeam = playerTeam(session.playerId);
+  const networkPlayers = [];
+  for (const p of list){
+    if (!p || p.id === session.playerId || !Array.isArray(p.codes)) continue;
+    const design = importCode(p.codes[0]);
+    if (design && modeAllowsDesign(design)) networkPlayers.push({ id: p.id, name: p.name || p.id, design, team: playerTeam(p.id) === myTeam ? 0 : 1, slot: playerSlot(p.id) });
   }
-  if (enemyDesigns.length === 0){
-    toast('Opponent fleet missing — cannot start', 'bad');
-    session.phase = 'lobby'; renderPhase(); return;
-  }
-  if (enemyDesigns.length !== modeDef().size || enemyDesigns.some(d => !modeAllowsDesign(d))){
-    toast('Opponent fleet does not match ' + modeDef().label, 'bad');
-    session.phase = 'lobby'; renderPhase(); return;
-  }
+  if (networkPlayers.length !== modeDef().maxPlayers - 1){ toast('Pilot roster incomplete — returning to lobby', 'bad'); session.phase = 'lobby'; renderPhase(); return; }
 
   const myLead = session.fleet[0];
-  const myAllies = session.fleet.slice(1);
+  const myAllies = [];
 
   // Adapt our net transport to Battle's expected shape:
   //   net: { role, send(msg), onMsg(cb), close() }
@@ -992,13 +1006,13 @@ function startMatch(){
   // via onMsg; we route incoming through a single dispatcher.
   battleSubs.clear();
   const battleNet = {
-    role: session.role,
+    role: session.playerId,
+    playerId: session.playerId,
     send: (m) => { if (net) net.send(m); },
     onMsg: (cb) => { battleSubs.add(cb); return () => battleSubs.delete(cb); },
     close: () => { /* net is closed in onEnd */ },
     // metadata Battle may use to spawn/identify the remote fleet
-    peerFleet: enemyDesigns,
-    peerFleetCodes: session.peerFleetCodes.slice(),
+    networkPlayers,
   };
 
   // Keep the exact same live transport used by the lobby. Closing it here
@@ -1013,8 +1027,9 @@ function startMatch(){
     allies: myAllies,
     enemies: [],                                   // PvE list is empty — this is human vs human
     env: modeDef().env,
-    objective: { type: 'pvp', label: modeDef().label, host: session.role === 'host' },
+    objective: { type: 'pvp', label: modeDef().label, host: session.playerId === 'host' },
     net: battleNet,
+    networkPlayers,
     onEnd: (result) => onMatchEnd(result),
   });
 }
@@ -1024,7 +1039,9 @@ function onMatchEnd(result){
   // requires groups to remain together after a round-based match.
   crazyGamesGameplayStop();
   if (!session){ Menu.show(); return; }
-  session.connected = !!net; session.peerJoined = !!net; session.peerReady = false; session.myReady = false;
+  session.connected = !!net; session.myReady = false;
+  for (const p of Object.values(session.players)) p.ready = false;
+  syncSelfProfile();
   session.phase = 'lobby';
   session.status = 'Round complete — ready up for a rematch.';
   updateCrazyGamesRoom(session.room, session.mode, false);

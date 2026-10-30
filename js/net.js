@@ -1,7 +1,7 @@
 // ============================================================================
 //  Ace of Sky II — net.js
 //  Relay client for human-vs-human PvP. There is NO direct peer connection:
-//  both browsers talk to the dependency-free relay (server/relay.py), which is
+//  every browser talks to the dependency-free relay (server/relay.py), which is
 //  a simple store-and-forward mailbox per room. This module:
 //    * creates / joins a room (host vs client),
 //    * PUSHES outgoing messages with POST /msg (batched, throttled),
@@ -59,10 +59,10 @@ async function jfetch(url, opts = {}, timeoutMs = 6000){
 //  Lobby helpers — used by pvp.js BEFORE a live connection exists.
 //  They do a single request and return a plain result.
 // ---------------------------------------------------------------------------
-export async function createRoom(url){
+export async function createRoom(url, maxPlayers = 10){
   const base = cleanUrl(url);
-  const r = await jfetch(base + '/room', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-  if (r.ok && r.body && r.body.ok) return { ok: true, room: r.body.room };
+  const r = await jfetch(base + '/room', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ maxPlayers }) });
+  if (r.ok && r.body && r.body.ok) return { ok: true, room: r.body.room, playerId: r.body.playerId || 'host', peers: r.body.peers || ['host'], maxPlayers: r.body.maxPlayers || maxPlayers };
   return { ok: false, error: (r.body && r.body.error) || 'relay unreachable' };
 }
 export async function joinRoom(url, room){
@@ -71,7 +71,7 @@ export async function joinRoom(url, room){
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ room: String(room || '').toUpperCase() }),
   });
-  if (r.ok && r.body && r.body.ok) return { ok: true, room: r.body.room, peers: r.body.peers || [] };
+  if (r.ok && r.body && r.body.ok) return { ok: true, room: r.body.room, playerId: r.body.playerId || 'client', peers: r.body.peers || [], maxPlayers: r.body.maxPlayers || 2 };
   return { ok: false, error: (r.body && r.body.error) || 'could not join room' };
 }
 export async function checkHealth(url){
@@ -87,7 +87,8 @@ export async function checkHealth(url){
 export function connect({ url, room, role, onState, onEvent, onPeer, onClose }){
   const base = cleanUrl(url);
   const code = String(room || '').toUpperCase();
-  const myRole = role === 'host' ? 'host' : 'client';
+  const myRole = /^(?:host|p(?:[2-9]|10))$/.test(String(role || '').toLowerCase()) ? String(role).toLowerCase() : (role === 'host' ? 'host' : 'client');
+  const multi = myRole !== 'client';
 
   // queues / timers / state
   let outbox = [];                   // messages waiting to be flushed
@@ -97,6 +98,8 @@ export function connect({ url, room, role, onState, onEvent, onPeer, onClose }){
   let lastPeerMsg = Date.now();     // last time we heard ANY traffic from them
   let pollTimer = null, sendTimer = null, watchTimer = null;
   let polling = false, sending = false;
+  let cursor = 0;
+  let rosterKey = '';
 
   const cbState = typeof onState === 'function' ? onState : () => {};
   const cbEvent = typeof onEvent === 'function' ? onEvent : () => {};
@@ -131,7 +134,7 @@ export function connect({ url, room, role, onState, onEvent, onPeer, onClose }){
         cbEvent(msg); break;
       case 'bye':
         cbEvent(msg);
-        shutdown('peer left');
+        if (!multi) shutdown('peer left');
         break;
       case 'ping':
         break; // keep-alive only; updates lastPeerMsg above
@@ -144,7 +147,10 @@ export function connect({ url, room, role, onState, onEvent, onPeer, onClose }){
   async function pollOnce(){
     if (!alive || polling) return;
     polling = true;
-    const r = await jfetch(`${base}/poll?room=${encodeURIComponent(code)}&from=${myRole}`, {}, 6000);
+    const query = multi
+      ? `room=${encodeURIComponent(code)}&player=${encodeURIComponent(myRole)}&after=${cursor}`
+      : `room=${encodeURIComponent(code)}&from=${myRole}`;
+    const r = await jfetch(`${base}/poll?${query}`, {}, 6000);
     polling = false;
     if (!alive) return;
     if (r.status === 404 || (r.body && r.body.gone)){
@@ -155,11 +161,17 @@ export function connect({ url, room, role, onState, onEvent, onPeer, onClose }){
       return;
     }
     fails = 0;
+    if (Number.isFinite(Number(r.body.cursor))) cursor = Number(r.body.cursor);
     // peer presence from the room roster
     const peers = r.body.peers || [];
-    const other = myRole === 'host' ? 'client' : 'host';
-    const hasPeer = peers.indexOf(other) >= 0;
-    if (hasPeer && !peerSeen){ peerSeen = true; try { cbPeer({ joined: true, peers }); } catch (e){} }
+    const nextRosterKey = peers.join('|');
+    const hasPeer = peers.some((id) => id !== myRole);
+    if (nextRosterKey !== rosterKey){
+      const previous = rosterKey ? rosterKey.split('|') : [];
+      rosterKey = nextRosterKey;
+      peerSeen = hasPeer;
+      try { cbPeer({ joined: peers.length > previous.length, peers, previous }); } catch (e){}
+    }
     // deliver queued messages in order
     const msgs = r.body.messages || [];
     for (const m of msgs) route(m);
@@ -170,7 +182,17 @@ export function connect({ url, room, role, onState, onEvent, onPeer, onClose }){
     if (!alive || sending) return;
     if (outbox.length === 0) return;
     sending = true;
-    const batch = outbox;
+    // Roster changes can cause several identical lobby snapshots to queue at
+    // once. Keep only the newest copy of each replaceable message so a
+    // ten-player room never blocks a tiny launch signal behind oversized data.
+    const replaceable = new Set(['hello', 'fleet', 'ready', 'state', 'start']);
+    const latest = new Map();
+    const events = [];
+    for (const msg of outbox){
+      if (msg && replaceable.has(msg.t)) latest.set(msg.t, msg);
+      else events.push(msg);
+    }
+    const batch = events.concat([...latest.values()]);
     outbox = [];
     const r = await jfetch(base + '/msg', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -200,6 +222,7 @@ export function connect({ url, room, role, onState, onEvent, onPeer, onClose }){
 
   // peer-timeout watchdog: if a peer was seen and then went silent, surface it.
   function startWatch(){
+    if (multi) return;
     watchTimer = setInterval(() => {
       if (!alive) return;
       if (peerSeen && (Date.now() - lastPeerMsg) > PEER_TIMEOUT_MS){
@@ -226,8 +249,10 @@ export function connect({ url, room, role, onState, onEvent, onPeer, onClose }){
     // best-effort goodbye so the peer learns immediately
     try {
       navigator.sendBeacon && navigator.sendBeacon(
-        base + '/msg',
-        new Blob([JSON.stringify({ room: code, from: myRole, data: { t: 'bye' } })], { type: 'application/json' })
+        multi ? base + '/leave' : base + '/msg',
+        new Blob([JSON.stringify(multi
+          ? { room: code, player: myRole }
+          : { room: code, from: myRole, data: { t: 'bye' } })], { type: 'application/json' })
       );
     } catch (e){ /* ignore */ }
     shutdown('local close');
