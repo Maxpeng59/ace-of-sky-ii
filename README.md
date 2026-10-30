@@ -36,7 +36,9 @@ python3 serve.py 8126
 
 ## Human-vs-human PvP
 
-Public PvP works out of the box through the official always-on HTTPS relay at **https://ace-of-sky-ii-relay.jimpeng.chatgpt.site**. Both players open the public game, choose **PVP ONLINE**, select **Quick Duel** or build a fleet, then one creates a room and shares the six-character code with the other. No server setup or pasted URL is required.
+Public PvP works out of the box through the official always-on HTTPS relay at **https://ace-of-sky-ii-relay.jimpeng.chatgpt.site**. Both players open the public game, choose **PVP ONLINE**, select **Quick Duel** or build a fleet, then one creates a room and shares either the six-character code or the **COPY INVITE LINK** URL with the other. No server setup or pasted URL is required.
+
+The CrazyGames HTML5 SDK v3 integration advertises joinable rooms with `updateRoom`, exposes the portal invite button plus the in-game invite-link button, reads invite parameters on startup and from the join-room listener, and routes `IsInstantMultiplayer` launches directly into a private PvP room. The room becomes non-joinable once both players connect, and the same party remains connected for rematches.
 
 The game uses a store-and-forward relay: both browsers send real-time state and combat events to room mailboxes rather than making a direct peer connection. Rooms expire automatically. The public relay persists room and mailbox state in D1 so it remains usable across backend instances.
 

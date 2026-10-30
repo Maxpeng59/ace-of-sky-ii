@@ -9,6 +9,8 @@ import { load, bus } from './core.js';
 import { Menu } from './menu.js';
 import { Music } from './music.js';
 import { toast } from './util.js';
+import { Pvp } from './pvp.js';
+import { initCrazyGames, crazyGamesLaunch, onCrazyGamesJoin } from './crazygames.js';
 
 // surface any uncaught error on-screen — invaluable while integrating modules
 function fatal(msg, detail){
@@ -30,13 +32,20 @@ addEventListener('unhandledrejection', (e) => {
   fatal('Unhandled promise rejection', e.reason);
 });
 
-function boot(){
+async function boot(){
   try {
     initEngine(document.getElementById('gl'));
     load();                                  // load save (or seed stock library)
+    await initCrazyGames();
     const splash = document.getElementById('boot');
     if (splash) splash.classList.add('hidden');
-    Menu.show();
+    onCrazyGamesJoin((params) => Pvp.openFromPlatform(params));
+    const launch = crazyGamesLaunch();
+    if ((launch.inviteParams && launch.inviteParams.room) || launch.instant){
+      Pvp.openFromPlatform({ ...(launch.inviteParams || {}), instant: launch.instant });
+    } else {
+      Menu.show();
+    }
     Music.play();                            // menu background music (starts on first user gesture if autoplay is blocked)
     bus.emit('booted');
   } catch (err){

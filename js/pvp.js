@@ -27,6 +27,10 @@ import { connect, createRoom, joinRoom, checkHealth, OFFICIAL_RELAY_URL } from '
 import { Hangar } from './hangar.js';
 import { Battle } from './battle.js';
 import { Menu } from './menu.js';
+import {
+  crazyGamesGameplayStart, crazyGamesGameplayStop, crazyGamesInviteLink, crazyGamesUsername,
+  leaveCrazyGamesRoom, updateCrazyGamesRoom,
+} from './crazygames.js';
 
 const ROOT_ID = 'screen-pvp';
 const SCREEN_IDS = ['screen-menu', 'screen-creative', 'screen-mission-planner', 'screen-campaign', 'screen-pvp', 'screen-hangar'];
@@ -65,6 +69,8 @@ function makeSession(){
     locked: false,                           // fleet frozen?
     mode: savedMode,
     peerMode: null,
+    playerName: crazyGamesUsername() || 'You',
+    peerName: 'Opponent',
     relayUrl: initialRelayUrl(),
     role: null,                              // 'host' | 'client'
     room: '',
@@ -92,7 +98,24 @@ export const Pvp = {
     if (!session) session = makeSession();
     renderPhase();
   },
+  openFromPlatform(params){ openFromPlatform(params); },
 };
+
+function openFromPlatform(params = {}){
+  if (session) cleanupSession();
+  Battle.stop();
+  session = makeSession();
+  if (PVP_MODES.some(m => m.id === params.mode)) session.mode = params.mode;
+  session.budget = modeDef().budget;
+  Pvp.show();
+  const design = quickDuelDesign();
+  if (!design){ toast('No compatible saved unit for ' + modeDef().label, 'bad'); return; }
+  session.fleet = Array.from({ length: modeDef().size }, () => cloneDesign(design, ''));
+  lockFleet(modeDef().label + ' ready');
+  const room = String(params.room || '').trim().toUpperCase();
+  if (/^[A-HJ-NP-Z2-9]{6}$/.test(room)) void doJoin(room);
+  else void doHost();
+}
 
 function exitToMenu(){
   cleanupSession();
@@ -102,6 +125,8 @@ function exitToMenu(){
 function cleanupSession(){
   stopDesignTimer();
   if (net){ try { net.close(); } catch (e){} net = null; }
+  leaveCrazyGamesRoom();
+  crazyGamesGameplayStop();
   for (const fn of teardownFns){ try { fn(); } catch (e){} }
   teardownFns = [];
   battleSubs.clear();
@@ -606,6 +631,7 @@ function renderLobby(){
   const back = el('button', 'btn small', '◂ DESIGN');
   back.onclick = () => {
     if (net){ try { net.close(); } catch (e){} net = null; }
+    leaveCrazyGamesRoom();
     session.connected = false; session.peerJoined = false; session.peerReady = false; session.myReady = false;
     session.role = null; session.room = ''; session.peerMode = null;
     startDesignTimer();
@@ -662,22 +688,30 @@ function renderLobby(){
       const copy = el('button', 'btn small', 'COPY');
       copy.onclick = () => { copyText(session.room); toast('Code copied — give it to your opponent', 'good'); };
       roomLine.appendChild(copy);
+      const invite = el('button', 'btn small accent', 'COPY INVITE LINK');
+      invite.onclick = async () => {
+        const link = await Promise.resolve(crazyGamesInviteLink(session.room, session.mode));
+        if (!link){ toast('Invite link unavailable', 'bad'); return; }
+        copyText(link); toast('Invite link copied', 'good');
+      };
+      roomLine.appendChild(invite);
     }
     conn.appendChild(roomLine);
 
     // peer presence
     const peerBox = el('div', 'card');
-    peerBox.appendChild(statusDot('Opponent', session.peerJoined, session.peerJoined ? 'connected' : 'waiting…'));
+    peerBox.appendChild(statusDot(session.peerName || 'Opponent', session.peerJoined, session.peerJoined ? 'connected' : 'waiting…'));
     conn.appendChild(peerBox);
 
     const me = el('div', 'card'); me.style.marginTop = '10px';
-    me.appendChild(statusDot('You', true, session.myReady ? 'READY' : 'not ready'));
+    me.appendChild(statusDot(session.playerName || 'You', true, session.myReady ? 'READY' : 'not ready'));
     conn.appendChild(me);
 
     const drop = el('button', 'btn small danger'); drop.textContent = 'Leave room';
     drop.style.marginTop = '12px';
     drop.onclick = () => {
       if (net){ try { net.close(); } catch (e){} net = null; }
+      leaveCrazyGamesRoom();
       session.connected = false; session.peerJoined = false; session.peerReady = false; session.myReady = false;
       session.peerMode = null;
       renderPhase();
@@ -770,6 +804,7 @@ async function doHost(){
   session.role = 'host'; session.room = res.room;
   startLiveNet();
   session.connected = true; session.status = 'Room ' + res.room + ' created. Share the code.';
+  updateCrazyGamesRoom(session.room, session.mode, true);
   toast('Room created: ' + res.room, 'good'); sfx('lockfull');
   renderPhase();
 }
@@ -784,6 +819,7 @@ async function doJoin(code){
   session.connected = true;
   session.peerJoined = (res.peers || []).indexOf('host') >= 0;
   session.status = 'Joined room ' + res.room + '.';
+  updateCrazyGamesRoom(session.room, session.mode, false);
   toast('Joined ' + res.room, 'good'); sfx('lockfull');
   renderPhase();
 }
@@ -811,6 +847,7 @@ function startLiveNet(){
       if (session && session.phase === 'lobby'){
         session.connected = false; session.peerJoined = false; session.peerReady = false;
         session.status = 'Disconnected: ' + reason;
+        leaveCrazyGamesRoom();
         toast('Connection lost: ' + reason, 'bad');
         renderPhase();
       } else if (session && session.phase === 'match'){
@@ -828,11 +865,12 @@ function dispatchBattleMsg(msg){
 
 function sendHello(){
   if (!net) return;
-  net.send({ t: 'hello', role: session.role, mode: session.mode });
+  net.send({ t: 'hello', role: session.role, mode: session.mode, name: session.playerName });
   // send fleet codes + lightweight meta for the lobby display
   net.send({
     t: 'fleet',
     mode: session.mode,
+    name: session.playerName,
     codes: session.myFleetCodes,
     meta: session.fleet.map(d => { let c = 0; try { c = statsOf(d).cost; } catch (e){} return { name: d.name, cost: c }; }),
   });
@@ -844,11 +882,13 @@ function onPeerChange(info){
   if (info.joined){
     session.peerJoined = true;
     session.status = 'Opponent connected.';
+    if (session.role === 'host') updateCrazyGamesRoom(session.room, session.mode, false);
     // re-send our fleet so the late joiner gets it
     sendHello();
     if (session.phase === 'lobby') renderPhase();
   } else if (info.timedOut){
     session.peerJoined = false;
+    if (session.role === 'host') updateCrazyGamesRoom(session.room, session.mode, true);
     if (session.phase === 'lobby'){ session.status = 'Opponent went quiet…'; renderPhase(); }
   }
 }
@@ -857,6 +897,7 @@ function onLobbyMsg(msg){
   if (!session || !msg) return;
   if (msg.t === 'hello'){
     session.peerJoined = true;
+    if (typeof msg.name === 'string' && msg.name.trim()) session.peerName = msg.name.trim().slice(0, 32);
     if (PVP_MODES.some(m => m.id === msg.mode)) session.peerMode = msg.mode;
     // someone just arrived — make sure they have our fleet/ready state
     sendHello();
@@ -869,6 +910,7 @@ function onLobbyMsg(msg){
     // already exchanged lobby `codes` payload.
     if (!Array.isArray(msg.codes)) return;
     if (PVP_MODES.some(m => m.id === msg.mode)) session.peerMode = msg.mode;
+    if (typeof msg.name === 'string' && msg.name.trim()) session.peerName = msg.name.trim().slice(0, 32);
     session.peerFleetCodes = Array.isArray(msg.codes) ? msg.codes : [];
     session.peerFleetMeta = Array.isArray(msg.meta) ? msg.meta : session.peerFleetCodes.map(() => ({ name: 'Aircraft', cost: 0 }));
     session.peerJoined = true;
@@ -883,6 +925,7 @@ function onLobbyMsg(msg){
   }
   if (msg.t === 'bye'){
     session.peerJoined = false; session.peerReady = false;
+    if (session.role === 'host') updateCrazyGamesRoom(session.room, session.mode, true);
     if (session.phase === 'lobby'){ session.status = 'Opponent left.'; renderPhase(); }
     return;
   }
@@ -922,6 +965,8 @@ function startMatch(){
   if (!session) return;
   matchStarting = false;
   session.phase = 'match';
+  updateCrazyGamesRoom(session.room, session.mode, false);
+  crazyGamesGameplayStart();
 
   // build the enemy fleet from the peer's design codes (human-driven over net)
   const enemyDesigns = [];
@@ -975,20 +1020,21 @@ function startMatch(){
 }
 
 function onMatchEnd(result){
-  // close the transport and return to the lobby for a rematch
-  if (net){ try { net.close(); } catch (e){} net = null; }
+  // Keep the same party and transport together for a rematch. CrazyGames
+  // requires groups to remain together after a round-based match.
+  crazyGamesGameplayStop();
   if (!session){ Menu.show(); return; }
-  session.connected = false; session.peerJoined = false; session.peerReady = false; session.myReady = false;
-  session.peerFleetCodes = []; session.peerFleetMeta = [];
-  session.peerMode = null;
-  session.role = null; session.room = '';
+  session.connected = !!net; session.peerJoined = !!net; session.peerReady = false; session.myReady = false;
   session.phase = 'lobby';
+  session.status = 'Round complete — ready up for a rematch.';
+  updateCrazyGamesRoom(session.room, session.mode, false);
+  if (net) net.send({ t: 'ready', ready: false });
 
   if (result){
     const r = result.win ? 'VICTORY' : (result.reason === 'draw' ? 'DRAW' : 'DEFEAT');
     toast(r + ' — ' + (result.kills || 0) + ' kills, ' + (result.deaths || 0) + ' losses', result.win ? 'good' : 'bad');
   }
-  // show the pvp screen again, back at a fresh lobby (must reconnect to rematch)
+  // show the PvP lobby again with the same room and opponent connected
   Pvp.show();
 }
 
