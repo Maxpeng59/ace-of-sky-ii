@@ -10,7 +10,7 @@ import { Menu } from './menu.js';
 import { Music } from './music.js';
 import { toast } from './util.js';
 import { Pvp } from './pvp.js';
-import { initCrazyGames, crazyGamesLaunch, onCrazyGamesJoin } from './crazygames.js';
+import { initCrazyGames, crazyGamesLaunch, onCrazyGamesJoin } from './crazygames.js?v=20261030-cgmp';
 
 // surface any uncaught error on-screen — invaluable while integrating modules
 function fatal(msg, detail){

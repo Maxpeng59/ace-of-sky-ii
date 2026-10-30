@@ -30,7 +30,7 @@ import { Menu } from './menu.js';
 import {
   crazyGamesGameplayStart, crazyGamesGameplayStop, crazyGamesInviteLink, crazyGamesUsername,
   leaveCrazyGamesRoom, updateCrazyGamesRoom,
-} from './crazygames.js';
+} from './crazygames.js?v=20261030-cgmp';
 
 const ROOT_ID = 'screen-pvp';
 const SCREEN_IDS = ['screen-menu', 'screen-creative', 'screen-mission-planner', 'screen-campaign', 'screen-pvp', 'screen-hangar'];
