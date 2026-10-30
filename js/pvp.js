@@ -31,6 +31,12 @@ import { Menu } from './menu.js';
 const ROOT_ID = 'screen-pvp';
 const SCREEN_IDS = ['screen-menu', 'screen-creative', 'screen-mission-planner', 'screen-campaign', 'screen-pvp', 'screen-hangar'];
 const RELAY_KEY = 'aceofsky2.relayUrl';
+const PVP_MODES = [
+  { id: 'duel', label: '1V1', size: 1, domain: 'air', env: 'day', budget: 40000 },
+  { id: 'squad3', label: '3V3', size: 3, domain: 'air', env: 'day', budget: 90000 },
+  { id: 'squad5', label: '5V5', size: 5, domain: 'air', env: 'day', budget: 150000 },
+  { id: 'ocean', label: 'OCEANIC BATTLE', size: 3, domain: 'naval', env: 'sea', budget: 150000 },
+];
 
 function initialRelayUrl(){
   const saved = (localStorage.getItem(RELAY_KEY) || '').trim();
@@ -49,6 +55,7 @@ let battleSubs = new Set(); // Battle subscribers once the lobby becomes a match
 let teardownFns = [];   // listeners to remove on exit
 
 function makeSession(){
+  const savedMode = PVP_MODES.some(m => m.id === State.pvp.mode) ? State.pvp.mode : 'duel';
   return {
     phase: 'setup',                          // setup | design | lobby | match
     budget: State.pvp.budget || 60000,
@@ -56,6 +63,8 @@ function makeSession(){
     remaining: State.pvp.designSeconds || 300,
     fleet: [],                               // array of AircraftDesign (mine)
     locked: false,                           // fleet frozen?
+    mode: savedMode,
+    peerMode: null,
     relayUrl: initialRelayUrl(),
     role: null,                              // 'host' | 'client'
     room: '',
@@ -107,30 +116,47 @@ function fleetCost(fleet){
   return c;
 }
 
+function modeDef(id = session && session.mode){
+  return PVP_MODES.find(m => m.id === id) || PVP_MODES[0];
+}
+
+function isVessel(d){
+  return !!(d && (d.isCarrier || d.role === 'carrier' || d.role === 'ship' || d.role === 'cruiser'));
+}
+
+function modeAllowsDesign(d, mode = modeDef()){
+  if (!d) return false;
+  const rightDomain = mode.domain === 'naval' ? isVessel(d) : !isVessel(d);
+  if (!rightDomain) return false;
+  try { return !!statsOf(d).ok; } catch (e){ return false; }
+}
+
+function fleetModeError(fleet, mode = modeDef()){
+  if (!Array.isArray(fleet) || fleet.length !== mode.size) return `This mode requires exactly ${mode.size} ${mode.domain === 'naval' ? 'vessels' : 'aircraft'}.`;
+  if (fleet.some(d => !modeAllowsDesign(d, mode))) return mode.domain === 'naval' ? 'Oceanic Battle accepts ships, cruisers, and carriers only.' : 'This mode accepts flight-ready aircraft only.';
+  return '';
+}
+
 function isOfficialRelay(){
   return session && session.relayUrl.replace(/\/$/, '') === OFFICIAL_RELAY_URL;
 }
 
 function quickDuelDesign(){
-  return (State.library || []).find(d => {
-    if (!d || d.role === 'ship' || d.role === 'carrier' || d.role === 'cruiser' || d.isCarrier) return false;
-    try { return !!statsOf(d).ok; } catch (e){ return false; }
-  }) || null;
+  const mode = modeDef();
+  return (State.library || []).find(d => modeAllowsDesign(d, mode)) || null;
 }
 
 function addRelayStatus(container){
   const card = el('div', 'card');
   card.style.marginTop = '14px';
   const row = el('div', 'row');
-  row.appendChild(el('b', '', isOfficialRelay() ? 'Official internet relay' : 'Custom relay'));
+  row.appendChild(el('b', '', isOfficialRelay() ? 'Official relay' : 'Custom relay'));
   row.appendChild(el('div', 'spacer'));
   const state = el('span', 'small mono', 'CHECKING…');
   state.style.color = 'var(--warn)';
   row.appendChild(state);
   card.appendChild(row);
-  card.appendChild(el('div', 'small muted', isOfficialRelay()
-    ? 'Always-on HTTPS service · no setup required · room codes expire automatically.'
-    : session.relayUrl));
+  if (!isOfficialRelay()) card.appendChild(el('div', 'small muted', session.relayUrl));
   container.appendChild(card);
   const checkedUrl = session.relayUrl;
   checkHealth(checkedUrl).then(ok => {
@@ -143,7 +169,7 @@ function addRelayStatus(container){
 function addAdvancedRelayControls(container){
   const details = el('details');
   details.style.marginTop = '12px';
-  const summary = el('summary', 'small muted', 'Advanced: use a custom development relay');
+  const summary = el('summary', 'small muted', 'Custom relay');
   summary.style.cursor = 'pointer';
   details.appendChild(summary);
   const field = el('label', 'field'); field.style.marginTop = '10px';
@@ -197,23 +223,40 @@ function renderSetup(){
   wrap.appendChild(head);
 
   const eyebrow = el('div', 'eyebrow', 'MULTIPLAYER · HUMAN vs HUMAN');
-  const h1 = el('h1', 'title', 'PvP DUEL');
+  const h1 = el('h1', 'title', 'PVP ONLINE');
   h1.style.fontSize = '48px';
-  const sub = el('div', 'subtitle', 'Create a room, share its code, and fight a real opponent online.');
-  wrap.appendChild(eyebrow); wrap.appendChild(h1); wrap.appendChild(sub);
+  wrap.appendChild(eyebrow); wrap.appendChild(h1);
+
+  const modePanel = el('div', 'panel');
+  modePanel.style.marginTop = '22px';
+  modePanel.appendChild(el('h2', '', 'Mode'));
+  const modeRow = el('div', 'pill-row');
+  for (const mode of PVP_MODES){
+    const button = el('button', 'pill' + (session.mode === mode.id ? ' sel' : ''), mode.label);
+    button.onclick = () => {
+      if (session.mode === mode.id) return;
+      session.mode = mode.id;
+      session.budget = mode.budget;
+      session.fleet = [];
+      sfx('click');
+      renderPhase();
+    };
+    modeRow.appendChild(button);
+  }
+  modePanel.appendChild(modeRow);
+  wrap.appendChild(modePanel);
 
   const quickDesign = quickDuelDesign();
+  const mode = modeDef();
   const quick = el('div', 'panel');
-  quick.style.cssText = 'margin-top:22px;border-color:var(--good);';
-  quick.appendChild(el('h2', '', 'Quick Online Duel'));
-  quick.appendChild(el('div', 'small muted', quickDesign
-    ? 'Skip fleet construction and enter the official lobby with your first flight-ready saved aircraft.'
-    : 'Save at least one flight-ready aircraft in your Library to use Quick Duel.'));
-  const quickBtn = el('button', 'btn accent big', quickDesign ? 'QUICK DUEL · USE ' + quickDesign.name : 'NO FLIGHT-READY AIRCRAFT');
+  quick.style.cssText = 'margin-top:14px;border-color:var(--good);';
+  quick.appendChild(el('h2', '', 'Quick Start'));
+  const unitWord = mode.domain === 'naval' ? 'VESSEL' : 'AIRCRAFT';
+  const quickBtn = el('button', 'btn accent big', quickDesign ? `USE ${quickDesign.name} ×${mode.size}` : `NO READY ${unitWord}`);
   quickBtn.style.marginTop = '14px'; quickBtn.disabled = !quickDesign;
   quickBtn.onclick = () => {
-    session.fleet = [cloneDesign(quickDesign, '')];
-    lockFleet('Quick Duel fleet ready');
+    session.fleet = Array.from({ length: mode.size }, () => cloneDesign(quickDesign, ''));
+    lockFleet(mode.label + ' ready');
   };
   quick.appendChild(quickBtn);
   addRelayStatus(quick);
@@ -221,11 +264,11 @@ function renderSetup(){
 
   const panel = el('div', 'panel');
   panel.style.marginTop = '22px';
-  panel.appendChild(el('h2', '', 'Match Setup'));
+  panel.appendChild(el('h2', '', 'Custom Fleet'));
 
   // budget control
   const bField = el('label', 'field');
-  bField.appendChild(el('span', '', 'Build budget (credits per fleet)'));
+  bField.appendChild(el('span', '', 'Budget'));
   const bRow = el('div', 'row');
   const bInput = el('input');
   bInput.type = 'number'; bInput.min = '5000'; bInput.max = '500000'; bInput.step = '5000';
@@ -248,7 +291,7 @@ function renderSetup(){
   // design time control
   const tField = el('label', 'field');
   tField.style.marginTop = '14px';
-  tField.appendChild(el('span', '', 'Design phase countdown'));
+  tField.appendChild(el('span', '', 'Design time'));
   const tRow = el('div', 'pill-row');
   const choices = [
     { s: 120, label: '2 min' }, { s: 300, label: '5 min' },
@@ -275,6 +318,7 @@ function renderSetup(){
   go.onclick = () => {
     State.pvp.budget = session.budget;
     State.pvp.designSeconds = session.designSeconds;
+    State.pvp.mode = session.mode;
     session.remaining = session.designSeconds;
     save();
     sfx('ui');
@@ -285,7 +329,7 @@ function renderSetup(){
   actions.appendChild(go);
 
   // option to reuse last fleet
-  if (Array.isArray(State.pvp.lastFleet) && State.pvp.lastFleet.length){
+  if (Array.isArray(State.pvp.lastFleet) && !fleetModeError(State.pvp.lastFleet, mode)){
     const reuse = el('button', 'btn', 'Reuse last fleet (' + State.pvp.lastFleet.length + ')');
     reuse.onclick = () => {
       session.fleet = State.pvp.lastFleet.map(d => cloneDesign(d, ''));
@@ -332,7 +376,7 @@ function renderDesign(){
   // top bar: timer, budget, spent
   const bar = el('div', 'topbar');
   bar.style.marginBottom = '18px';
-  bar.appendChild(el('span', '', 'DESIGN PHASE'));
+  bar.appendChild(el('span', '', modeDef().label));
   const tPill = el('span', 'pill');
   tPill.appendChild(el('span', 'muted', 'TIME '));
   timerEl = el('span', 'mono', fmtTime(session.remaining));
@@ -367,14 +411,22 @@ function renderDesign(){
     over.innerHTML = '<span class="err">Over budget by ' + fmtCr(spent - session.budget) + ' — trim the fleet before locking in.</span>';
     spendPanel.appendChild(over);
   }
+  const modeError = fleetModeError(session.fleet);
+  if (session.fleet.length && modeError){
+    const warning = el('div', 'warns'); warning.style.marginTop = '6px';
+    warning.textContent = modeError;
+    spendPanel.appendChild(warning);
+  }
   wrap.appendChild(spendPanel);
 
   // header row
   const hrow = el('div', 'row');
   hrow.style.marginBottom = '8px';
-  hrow.appendChild(el('h2', '', 'Your Fleet (' + session.fleet.length + ')'));
+  const mode = modeDef();
+  hrow.appendChild(el('h2', '', `Your ${mode.label} Fleet (${session.fleet.length}/${mode.size})`));
   const hsp = el('div', 'spacer'); hrow.appendChild(hsp);
-  const newBtn = el('button', 'btn accent', '✚ NEW AIRCRAFT');
+  const newBtn = el('button', 'btn accent', mode.domain === 'naval' ? '✚ NEW VESSEL' : '✚ NEW AIRCRAFT');
+  newBtn.disabled = session.fleet.length >= mode.size;
   newBtn.onclick = () => openDesignEditor(null);
   hrow.appendChild(newBtn);
   const impBtn = el('button', 'btn', '⇩ IMPORT CODE');
@@ -387,8 +439,7 @@ function renderDesign(){
   if (session.fleet.length === 0){
     const empty = el('div', 'panel');
     empty.style.textAlign = 'center'; empty.style.color = 'var(--ink-dim)';
-    empty.innerHTML = 'No aircraft yet. Click <b>NEW AIRCRAFT</b> to design your first one.<br>' +
-      'The <b>first</b> aircraft in the fleet is your <b>lead</b> (you fly it); the rest are AI-free wingmen you switch to as you lose craft.';
+    empty.textContent = `Add ${mode.size} ${mode.domain === 'naval' ? 'vessels' : 'aircraft'}.`;
     list.appendChild(empty);
   } else {
     session.fleet.forEach((d, i) => list.appendChild(fleetRow(d, i)));
@@ -403,7 +454,7 @@ function renderDesign(){
   foot.appendChild(back);
   const fsp = el('div', 'spacer'); foot.appendChild(fsp);
   const lock = el('button', 'btn gold big', '🔒 LOCK FLEET & GO TO LOBBY');
-  lock.disabled = session.fleet.length === 0 || spent > session.budget;
+  lock.disabled = !!modeError || spent > session.budget;
   lock.onclick = () => lockFleet('Fleet locked.');
   foot.appendChild(lock);
   wrap.appendChild(foot);
@@ -437,6 +488,7 @@ function fleetRow(d, i){
   edit.onclick = () => openDesignEditor(i);
   row.appendChild(edit);
   const dup = el('button', 'btn small', 'DUP');
+  dup.disabled = session.fleet.length >= modeDef().size;
   dup.onclick = () => { session.fleet.splice(i + 1, 0, cloneDesign(d)); sfx('click'); renderPhase(); };
   row.appendChild(dup);
   const exp = el('button', 'btn small', 'CODE');
@@ -458,6 +510,7 @@ function fleetRow(d, i){
 // enforcing the remaining-budget as the hangar's budget bar.
 function openDesignEditor(index){
   const isNew = index == null;
+  if (isNew && session.fleet.length >= modeDef().size){ toast('Fleet is full', 'warn'); return; }
   const base = isNew ? newDesign('Fleet ' + (session.fleet.length + 1)) : session.fleet[index];
   const editing = cloneDesign(base, '');         // edit a clone; commit on exit
   editing.id = base.id;                           // keep id stable for in-place save
@@ -485,6 +538,7 @@ function openDesignEditor(index){
 
 function commitDesign(index, design, stats){
   if (!session) return;
+  if (index == null && session.fleet.length >= modeDef().size){ toast('Fleet is full', 'warn'); return; }
   // validate vs budget for the whole fleet
   const others = session.fleet.filter((_, i) => i !== index);
   const cost = stats ? stats.cost : fleetCost([design]);
@@ -512,6 +566,7 @@ function exportDesignPrompt(d){
   sfx('click');
 }
 function importDesignPrompt(){
+  if (session.fleet.length >= modeDef().size){ toast('Fleet is full', 'warn'); return; }
   showCodeModal('Paste an ASK2 design code', '', true, (code) => {
     const d = importCode(code);
     if (!d){ toast('Invalid design code', 'bad'); return; }
@@ -524,11 +579,13 @@ function importDesignPrompt(){
 function lockFleet(msg){
   // drop invalid/empty craft, warn if over budget but allow (battle clamps)
   session.fleet = session.fleet.filter(d => d && d.parts && d.parts.length);
-  if (session.fleet.length === 0){ toast('Design at least one aircraft first', 'bad'); session.phase = 'design'; renderPhase(); return; }
+  const modeError = fleetModeError(session.fleet);
+  if (modeError){ toast(modeError, 'bad'); session.phase = 'design'; renderPhase(); return; }
   stopDesignTimer();
   session.locked = true;
   // persist for reuse next session
   State.pvp.lastFleet = session.fleet.map(d => cloneDesign(d, ''));
+  State.pvp.mode = session.mode;
   save();
   session.myFleetCodes = session.fleet.map(d => exportCode(d));
   toast(msg || 'Fleet locked', 'good');
@@ -550,7 +607,7 @@ function renderLobby(){
   back.onclick = () => {
     if (net){ try { net.close(); } catch (e){} net = null; }
     session.connected = false; session.peerJoined = false; session.peerReady = false; session.myReady = false;
-    session.role = null; session.room = '';
+    session.role = null; session.room = ''; session.peerMode = null;
     startDesignTimer();
     session.phase = 'design'; renderPhase();
   };
@@ -559,7 +616,7 @@ function renderLobby(){
   head.appendChild(el('div', 'eyebrow', 'LOBBY'));
   wrap.appendChild(head);
 
-  const h1 = el('h1', 'title', 'LOBBY'); h1.style.fontSize = '40px';
+  const h1 = el('h1', 'title', modeDef().label + ' LOBBY'); h1.style.fontSize = '40px';
   wrap.appendChild(h1);
 
   const grid = el('div', 'split');
@@ -590,13 +647,6 @@ function renderLobby(){
     joinField.appendChild(jrow);
     conn.appendChild(joinField);
 
-    const health = el('button', 'btn small ghost', 'CHECK ONLINE SERVICE');
-    health.style.marginTop = '12px';
-    health.onclick = async () => {
-      const ok = await checkHealth(session.relayUrl);
-      toast(ok ? 'Online service reachable ✔' : 'Online service unreachable ✕', ok ? 'good' : 'bad');
-    };
-    conn.appendChild(health);
     addAdvancedRelayControls(conn);
   } else {
     // connected — show room + role + peer status
@@ -629,6 +679,7 @@ function renderLobby(){
     drop.onclick = () => {
       if (net){ try { net.close(); } catch (e){} net = null; }
       session.connected = false; session.peerJoined = false; session.peerReady = false; session.myReady = false;
+      session.peerMode = null;
       renderPhase();
     };
     conn.appendChild(drop);
@@ -671,18 +722,23 @@ function renderLobby(){
 
   // readiness + launch
   if (session.connected){
+    const peerModeOk = !session.peerMode || session.peerMode === session.mode;
+    const peerFleetOk = peerModeOk && peerCount === modeDef().size;
     const ready = el('div', 'row'); ready.style.marginTop = '16px';
     const readyBtn = el('button', 'btn ' + (session.myReady ? '' : 'accent'),
       session.myReady ? '✓ READY (click to unready)' : 'I AM READY');
+    readyBtn.disabled = peerCount > 0 && !peerFleetOk;
     readyBtn.onclick = () => toggleReady();
     ready.appendChild(readyBtn);
     right.appendChild(ready);
 
-    const both = session.myReady && session.peerReady && session.peerJoined && peerCount > 0;
+    const both = session.myReady && session.peerReady && session.peerJoined && peerFleetOk;
     const status = el('div', 'small'); status.style.marginTop = '10px';
-    if (both) { status.style.color = 'var(--good)'; status.textContent = 'Both players ready — launching duel…'; }
-    else if (session.myReady && !session.peerReady) { status.style.color = 'var(--warn)'; status.textContent = 'Waiting for opponent to ready up…'; }
-    else status.style.color = 'var(--ink-dim)', status.textContent = 'Ready up when your fleet is set.';
+    if (!peerModeOk) { status.style.color = 'var(--bad)'; status.textContent = `Mode mismatch: opponent selected ${modeDef(session.peerMode).label}.`; }
+    else if (peerCount > 0 && peerCount !== modeDef().size) { status.style.color = 'var(--bad)'; status.textContent = `Opponent needs ${modeDef().size} units.`; }
+    else if (both) { status.style.color = 'var(--good)'; status.textContent = 'Launching…'; }
+    else if (session.myReady && !session.peerReady) { status.style.color = 'var(--warn)'; status.textContent = 'Waiting for opponent…'; }
+    else { status.style.color = 'var(--ink-dim)'; status.textContent = 'Ready when set.'; }
     right.appendChild(status);
   }
   grid.appendChild(right);
@@ -772,10 +828,11 @@ function dispatchBattleMsg(msg){
 
 function sendHello(){
   if (!net) return;
-  net.send({ t: 'hello', role: session.role });
+  net.send({ t: 'hello', role: session.role, mode: session.mode });
   // send fleet codes + lightweight meta for the lobby display
   net.send({
     t: 'fleet',
+    mode: session.mode,
     codes: session.myFleetCodes,
     meta: session.fleet.map(d => { let c = 0; try { c = statsOf(d).cost; } catch (e){} return { name: d.name, cost: c }; }),
   });
@@ -800,6 +857,7 @@ function onLobbyMsg(msg){
   if (!session || !msg) return;
   if (msg.t === 'hello'){
     session.peerJoined = true;
+    if (PVP_MODES.some(m => m.id === msg.mode)) session.peerMode = msg.mode;
     // someone just arrived — make sure they have our fleet/ready state
     sendHello();
     if (session.phase === 'lobby') renderPhase();
@@ -810,10 +868,11 @@ function onLobbyMsg(msg){
     // during the 600 ms lobby-to-match transition; do not let it erase the
     // already exchanged lobby `codes` payload.
     if (!Array.isArray(msg.codes)) return;
+    if (PVP_MODES.some(m => m.id === msg.mode)) session.peerMode = msg.mode;
     session.peerFleetCodes = Array.isArray(msg.codes) ? msg.codes : [];
     session.peerFleetMeta = Array.isArray(msg.meta) ? msg.meta : session.peerFleetCodes.map(() => ({ name: 'Aircraft', cost: 0 }));
     session.peerJoined = true;
-    if (session.phase === 'lobby') renderPhase();
+    if (session.phase === 'lobby'){ renderPhase(); maybeStartMatch(); }
     return;
   }
   if (msg.t === 'ready'){
@@ -848,6 +907,8 @@ function maybeStartMatch(){
   if (!session.peerJoined) return;
   if (!session.peerFleetCodes || session.peerFleetCodes.length === 0) return;
   if (!session.fleet || session.fleet.length === 0) return;
+  if (session.peerMode !== session.mode) return;
+  if (session.peerFleetCodes.length !== modeDef().size) return;
   matchStarting = true;
   session.status = 'Launching…';
   // small delay so the final 'ready' has time to round-trip both ways
@@ -870,6 +931,10 @@ function startMatch(){
   }
   if (enemyDesigns.length === 0){
     toast('Opponent fleet missing — cannot start', 'bad');
+    session.phase = 'lobby'; renderPhase(); return;
+  }
+  if (enemyDesigns.length !== modeDef().size || enemyDesigns.some(d => !modeAllowsDesign(d))){
+    toast('Opponent fleet does not match ' + modeDef().label, 'bad');
     session.phase = 'lobby'; renderPhase(); return;
   }
 
@@ -902,8 +967,8 @@ function startMatch(){
     player: myLead,
     allies: myAllies,
     enemies: [],                                   // PvE list is empty — this is human vs human
-    env: 'day',
-    objective: { type: 'pvp', label: 'PVP DUEL', host: session.role === 'host' },
+    env: modeDef().env,
+    objective: { type: 'pvp', label: modeDef().label, host: session.role === 'host' },
     net: battleNet,
     onEnd: (result) => onMatchEnd(result),
   });
@@ -915,6 +980,7 @@ function onMatchEnd(result){
   if (!session){ Menu.show(); return; }
   session.connected = false; session.peerJoined = false; session.peerReady = false; session.myReady = false;
   session.peerFleetCodes = []; session.peerFleetMeta = [];
+  session.peerMode = null;
   session.role = null; session.room = '';
   session.phase = 'lobby';
 

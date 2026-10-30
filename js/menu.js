@@ -596,7 +596,7 @@ function buildModeButtons(){
     'gold', () => { exitMenu(); Campaign.show(); },
   ));
   wrap.appendChild(modeBtn(
-    'PVP ONLINE', 'Create a room, share its code, and dogfight another human through the official internet service.',
+    'PVP ONLINE', '1v1 · 3v3 · 5v5 · Oceanic Battle',
     '', () => { exitMenu(); Pvp.show(); },
   ));
 

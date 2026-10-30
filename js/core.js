@@ -67,7 +67,7 @@ export const State = {
     carrierId: null,            // owned carrier design id
     active: null,               // current sortie loadout
   },
-  pvp: { lastFleet: [], budget: 60000, designSeconds: 300 },
+  pvp: { lastFleet: [], budget: 60000, designSeconds: 300, mode: 'duel' },
 };
 
 export function save(){

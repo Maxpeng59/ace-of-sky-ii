@@ -3079,8 +3079,10 @@ class Sim {
 
     if (type === 'deathmatch' || type === 'pvp'){
       if (this.net){
-        // PvP: win when all team-1 (remote) craft are gone, after they've spawned
-        if (this.netSpawned && enemiesAlive === 0 && this.craft.some(c => c.team === 1)){
+        // PvP: win only when the entire remote task force is gone. Oceanic
+        // battles include carrier-style AI vessels as well as the piloted lead.
+        const hadRemoteForce = this.craft.some(c => c.team === 1) || this.carriers.some(c => c.team === 1);
+        if (this.netSpawned && hostilesAlive === 0 && hadRemoteForce){
           this.endBattle(true, 'Enemy fleet destroyed');
         }
       } else if (hostilesAlive === 0 && (this.craft.length > 0 || this.carriers.length > 0)){
@@ -3156,10 +3158,21 @@ class Sim {
     codes.forEach((code, i) => {
       const d = importCode(code) || stockGet('stock_falcon');
       if (!d) return;
+      const vessel = !!(d.isCarrier || d.role === 'carrier' || d.role === 'ship' || d.role === 'cruiser');
+      if (vessel && i > 0){
+        this.makeCarrier(d, 1, new THREE.Vector3(-260 - i * 170, 0, 1750 + i * 220));
+        return;
+      }
       // remote fleet faces us, mirrored to the far side of the map
-      const pos = new THREE.Vector3((i % 2 ? 1 : -1) * (40 + i * 30), 360 + i * 20, 1800 + i * 60);
+      const pos = new THREE.Vector3((i % 2 ? 1 : -1) * (40 + i * 30), vessel ? 0 : 360 + i * 20, 1800 + i * 60);
       const c = this.makeCraft(d, 1, pos, Math.PI, false);
       c.name = d.name || ('Enemy ' + (i + 1));
+      if (vessel){
+        c.grounded = true;
+        c.vel.set(0, 0, 0);
+        c.pos.y = this.shipRestY(c);
+        c.group.position.copy(c.pos);
+      }
       if (i === 0){ c.isRemote = true; this.remote = c; }   // the human-controlled lead — NO AI
       else { c.isAI = true; initAI(c, 0.55); }              // the rest of their fleet flown by light AI
     });
