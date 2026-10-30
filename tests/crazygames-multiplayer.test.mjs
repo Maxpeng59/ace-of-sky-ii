@@ -60,6 +60,17 @@ assert.ok(calls.some(([name]) => name === 'gameplayStart'));
 assert.ok(calls.some(([name]) => name === 'gameplayStop'));
 assert.ok(calls.some(([name]) => name === 'leftRoom'));
 
+// The same published bundle must not wait on the SDK parent handshake when it
+// runs independently on GitHub Pages; URL invites still work there.
+globalThis.location = new URL('https://maxpeng59.github.io/ace-of-sky-ii/?room=JKL567&mode=duel');
+let offPortalInitCalled = false;
+globalThis.window.CrazyGames.SDK.init = async () => { offPortalInitCalled = true; };
+const offPortalBridge = await import('../js/crazygames.js?off-portal=' + Date.now());
+const offPortalLaunch = await offPortalBridge.initCrazyGames();
+assert.equal(offPortalInitCalled, false);
+assert.equal(offPortalLaunch.enabled, false);
+assert.deepEqual(offPortalLaunch.inviteParams, { room: 'JKL567', mode: 'duel' });
+
 const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const mainSource = fs.readFileSync(new URL('../js/main.js', import.meta.url), 'utf8');
 const pvpSource = fs.readFileSync(new URL('../js/pvp.js', import.meta.url), 'utf8');

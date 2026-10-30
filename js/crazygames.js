@@ -26,9 +26,19 @@ function urlLaunchParams(){
   } catch (e){ return { room: '', mode: '' }; }
 }
 
+function isCrazyGamesRuntime(){
+  try {
+    const host = String(location.hostname || '').toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1' || host === 'crazygames.com' || host.endsWith('.crazygames.com');
+  } catch (e){ return false; }
+}
+
 export async function initCrazyGames(){
   sdk = globalThis.window && window.CrazyGames && window.CrazyGames.SDK;
-  if (!sdk) return { enabled: false, instant: false, inviteParams: urlLaunchParams(), username: '' };
+  // The SDK's init handshake intentionally waits for the CrazyGames parent.
+  // Skip it on independent hosts (for example GitHub Pages), where URL invite
+  // parameters still provide the same direct room-join behavior.
+  if (!sdk || !isCrazyGamesRuntime()) return { enabled: false, instant: false, inviteParams: urlLaunchParams(), username: '' };
   try {
     await sdk.init();
     enabled = sdk.environment === 'local' || sdk.environment === 'crazygames';
