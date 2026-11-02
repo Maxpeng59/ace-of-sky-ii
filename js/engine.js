@@ -77,10 +77,9 @@ function loop(now){
   if (dt > 0.1) dt = 0.1;                 // clamp after tab-switches
   for (const fn of frameCbs){ try { fn(dt); } catch (e){ console.error('frame cb', e); } }
   if (renderer && curScene && curCamera){
-    renderer.render(curScene, curCamera);
-    // Adaptive down-scale: if frames are sustained slower than ~60 FPS, shed render resolution
-    // (toward dprFloor) to recover smoothness. EMA-smoothed so a single hitch doesn't trigger it;
-    // re-evaluated twice a second; reset to full on each setScene(). Only the WebGL buffer scales.
+    // Changing the drawing-buffer size clears the WebGL canvas. Adapt BEFORE
+    // drawing so the browser never presents a cleared frame as a screen flash.
+    // EMA-smoothed so a single hitch does not trigger a resolution change.
     if (dprCap > dprFloor){
       frameEMA += (dt - frameEMA) * 0.12;
       adaptT += dt;
@@ -90,9 +89,10 @@ function loop(now){
         let nd = curDpr;
         if (ms > 18 && curDpr > dprFloor) nd = Math.max(dprFloor, curDpr - 0.2);   // slow (<55 FPS) → shed resolution
         else if (ms < 13 && curDpr < dprCap) nd = Math.min(dprCap, curDpr + 0.1);  // headroom (>77 FPS) → restore sharpness
-        if (nd !== curDpr){ curDpr = nd; renderer.setPixelRatio(curDpr); renderer.setSize(innerWidth, innerHeight, false); }
+        if (nd !== curDpr){ curDpr = nd; renderer.setPixelRatio(curDpr); }
       }
     }
+    renderer.render(curScene, curCamera);
   }
   requestAnimationFrame(loop);
 }
