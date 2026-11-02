@@ -8,6 +8,8 @@ let instant = false;
 let inviteParams = null;
 let username = '';
 let gameplayActive = false;
+let rewardedAdPending = false;
+let rewardedAdsDisabled = false;
 const joinListeners = new Set();
 
 function cleanLaunchParams(value){
@@ -36,6 +38,8 @@ function isCrazyGamesRuntime(){
 
 export async function initCrazyGames(){
   gameplayActive = false;
+  rewardedAdPending = false;
+  rewardedAdsDisabled = false;
   sdk = globalThis.window && window.CrazyGames && window.CrazyGames.SDK;
   // The SDK's init handshake intentionally waits for the CrazyGames parent.
   // Skip it on independent hosts (for example GitHub Pages), where URL invite
@@ -124,4 +128,38 @@ export function crazyGamesGameplayStop(){
   if (!gameplayActive) return;
   gameplayActive = false;
   if (enabled && game && typeof game.gameplayStop === 'function') try { game.gameplayStop(); } catch (e){}
+}
+
+export function crazyGamesRewardedAdsAvailable(){
+  return enabled && !rewardedAdsDisabled && !!(sdk && sdk.ad && typeof sdk.ad.requestAd === 'function');
+}
+
+// The SDK's completion callback is the only proof that a rewarded ad was watched.
+// Ignore late or duplicate callbacks, and hide the offer for this session when
+// the platform reports that ads are disabled (including Basic Launch).
+export function requestCrazyGamesRewardedAd(onStarted = () => {}){
+  if (!crazyGamesRewardedAdsAvailable() || rewardedAdPending){
+    return Promise.resolve({ status: 'unavailable' });
+  }
+  rewardedAdPending = true;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      rewardedAdPending = false;
+      if (result.code === 'adsDisabled') rewardedAdsDisabled = true;
+      resolve(result);
+    };
+    try {
+      const result = sdk.ad.requestAd('rewarded', {
+        adStarted: () => { if (!settled) onStarted(); },
+        adFinished: () => finish({ status: 'finished' }),
+        adError: (error) => finish({ status: 'error', code: error && error.code || 'other' }),
+      });
+      if (result && typeof result.catch === 'function') result.catch((error) => finish({ status: 'error', code: error && error.code || 'other' }));
+    } catch (error){
+      finish({ status: 'error', code: error && error.code || 'other' });
+    }
+  });
 }

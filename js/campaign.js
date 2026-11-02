@@ -10,7 +10,7 @@
 //  Reads/writes State.campaign + the credit economy; persists with save().
 // ============================================================================
 import {
-  $, el, clear, fmtCr, fmtNum, toast, sfx, clamp,
+  $, el, clear, fmtCr, fmtNum, toast, sfx, clamp, setAdAudioMuted,
 } from './util.js';
 import {
   State, save, spend, earn, canAfford,
@@ -20,6 +20,8 @@ import {
 import { Hangar } from './hangar.js';
 import { Battle } from './battle.js';
 import { Menu } from './menu.js';
+import { Music } from './music.js';
+import { crazyGamesRewardedAdsAvailable, requestCrazyGamesRewardedAd } from './crazygames.js';
 
 // ---------------------------------------------------------------------------
 //  RANKS — completing missions advances the day; enough completions promote you.
@@ -270,6 +272,10 @@ let curTab = 'missions';
 let curRegion = null;        // selected world-map theatre id
 let moneyOff = null;          // bus 'money' unsubscribe
 const dom = {};              // cached header nodes for cheap refreshes
+const AD_REWARD = 1000;
+const AD_COOLDOWN_MS = 10 * 60 * 1000;
+let adPending = false;
+let adTimer = null;
 
 // ---------------------------------------------------------------------------
 //  helpers
@@ -328,6 +334,57 @@ function refreshTopbar(){
   dom.rank.textContent = State.campaign.rank;
   const done = State.campaign.completed.length;
   dom.progress.textContent = done + ' / ' + MISSIONS.length + ' missions';
+  if (dom.adButton){
+    // Give players a mission first; the optional reward is never a substitute
+    // for the campaign's regular mission payouts.
+    dom.adButton.hidden = done === 0 || !crazyGamesRewardedAdsAvailable();
+    const remaining = Math.max(0, AD_COOLDOWN_MS - (Date.now() - (Number(State.campaign.rewardedAdAt) || 0)));
+    dom.adButton.disabled = adPending || remaining > 0;
+    const totalSeconds = Math.ceil(remaining / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    dom.adButton.textContent = adPending ? 'Requesting ad…'
+      : remaining > 0 ? `Ad ready in ${minutes}:${String(seconds).padStart(2, '0')}`
+      : '▶ Optional ad · +1,000 ☼';
+  }
+}
+
+async function watchCampaignAd(){
+  if (adPending || !crazyGamesRewardedAdsAvailable() || State.campaign.completed.length === 0) return;
+  if (Date.now() - (Number(State.campaign.rewardedAdAt) || 0) < AD_COOLDOWN_MS) return;
+  adPending = true;
+  refreshTopbar();
+  const blocker = el('div', 'campaign-ad-blocker');
+  blocker.setAttribute('role', 'status');
+  blocker.textContent = 'Requesting optional video ad…';
+  document.body.appendChild(blocker);
+  if (root) root.inert = true;
+  let adStarted = false;
+  try {
+    const result = await requestCrazyGamesRewardedAd(() => {
+      adStarted = true;
+      setAdAudioMuted(true);
+      Music.setAdMuted(true);
+      blocker.textContent = 'Ad playing…';
+    });
+    if (result.status === 'finished'){
+      State.campaign.rewardedAdAt = Date.now();
+      earn(AD_REWARD);
+      toast('Ad complete — +' + fmtCr(AD_REWARD), 'good');
+    } else if (result.code === 'adsDisabled'){
+      toast('Ads are unavailable here. Missions still earn credits.', 'warn');
+    } else if (result.code === 'adblock'){
+      toast('Ad blocked. No credits charged; try missions instead.', 'warn');
+    } else {
+      toast('No ad available right now. Try again later.', 'warn');
+    }
+  } finally {
+    if (adStarted){ Music.setAdMuted(false); setAdAudioMuted(false); }
+    if (root) root.inert = false;
+    blocker.remove();
+    adPending = false;
+    refreshTopbar();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -361,11 +418,14 @@ export const Campaign = {
     // live-update the credits readout whenever the economy changes elsewhere
     if (moneyOff) moneyOff();
     moneyOff = bus.on('money', () => refreshTopbar());
+    if (adTimer) clearInterval(adTimer);
+    adTimer = setInterval(refreshTopbar, 1000);
   },
 
   // teardown — main.js may call this, and we call it ourselves on BACK.
   close(){
     if (moneyOff){ moneyOff(); moneyOff = null; }
+    if (adTimer){ clearInterval(adTimer); adTimer = null; }
     if (root){ clear(root); root.classList.add('hidden'); }
   },
 };
@@ -545,6 +605,12 @@ function buildShell(){
   creditsPill.innerHTML = '<span class="muted small">Credits </span>';
   dom.money = el('span', 'credits'); creditsPill.appendChild(dom.money);
   bar.appendChild(creditsPill);
+
+  dom.adButton = el('button', 'btn small campaign-ad-button');
+  dom.adButton.type = 'button';
+  dom.adButton.title = 'Optional video ad for 1,000 credits. Missions also earn credits.';
+  dom.adButton.onclick = watchCampaignAd;
+  bar.appendChild(dom.adButton);
 
   const back = el('button', 'btn small', '◂ Menu');
   back.onclick = () => { sfx('ui'); Campaign.close(); Menu.show(); };

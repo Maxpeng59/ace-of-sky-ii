@@ -44,6 +44,8 @@ Public PvP works out of the box through the official always-on HTTPS relay at **
 
 The CrazyGames HTML5 SDK v3 integration advertises joinable rooms with `updateRoom`, exposes the portal invite button plus the in-game invite-link button, reads invite parameters on startup and from the join-room listener, and routes `IsInstantMultiplayer` launches directly into a private PvP room. The room becomes non-joinable once both players connect, and the same party remains connected for rematches.
 
+After the first completed campaign mission, eligible CrazyGames players can choose an optional rewarded video in the campaign hub for 1,000 credits. The offer has a ten-minute cooldown. Credits are granted only after the SDK's `adFinished` callback; unavailable or blocked ads give no credits, and the offer disappears for the session if CrazyGames reports `adsDisabled`. Missions remain the regular way to earn credits. The offer is hidden outside CrazyGames, including on GitHub Pages. CrazyGames disables ads and revenue sharing during Basic Launch; this integration becomes monetizable only when the game is eligible for ads on the platform.
+
 The game uses a store-and-forward relay: every browser sends real-time state and combat events through a room event stream rather than making direct peer connections. Rooms, inactive pilot slots, and messages expire automatically. The public relay persists room state in D1 so it remains usable across backend instances.
 
 For local development or a private LAN, the dependency-free Python reference relay is still available:

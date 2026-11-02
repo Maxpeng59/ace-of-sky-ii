@@ -55,7 +55,15 @@ export function fmtTime(s){ const m = Math.floor(s / 60), ss = Math.floor(s % 60
 
 // ---------- tiny synth audio ----------
 let actx = null;
+let adAudioMuted = false;
+export function setAdAudioMuted(muted){
+  adAudioMuted = !!muted;
+  if (actx){
+    try { if (adAudioMuted) actx.suspend(); else actx.resume(); } catch (e){}
+  }
+}
 export function audio(){
+  if (adAudioMuted) return null;
   if (!actx){ try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e){ return null; } }
   if (actx.state === 'suspended') actx.resume();
   return actx;

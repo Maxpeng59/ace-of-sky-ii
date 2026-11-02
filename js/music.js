@@ -19,6 +19,7 @@ const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 
 let audio = null;
 let wantPlay = false;          // are we on a menu screen (vs in a battle)?
+let adMuted = false;
 let gestureHooked = false;
 
 function musicOn(){ return (State.settings && State.settings.music) !== false; }
@@ -47,6 +48,7 @@ function hookGesture(){
 }
 
 function start(){
+  if (adMuted) return;
   ensure();
   audio.volume = vol();
   const p = audio.play();
@@ -66,6 +68,11 @@ export const Music = {
   refresh(){
     if (audio) audio.volume = vol();
     if (!musicOn()){ if (audio) audio.pause(); return; }
-    if (wantPlay && (!audio || audio.paused)) start();
+    if (wantPlay && !adMuted && (!audio || audio.paused)) start();
+  },
+  setAdMuted(muted){
+    adMuted = !!muted;
+    if (adMuted){ if (audio) audio.pause(); }
+    else if (wantPlay && musicOn()) start();
   },
 };
