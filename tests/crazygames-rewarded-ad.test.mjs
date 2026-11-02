@@ -11,6 +11,9 @@ globalThis.window = { CrazyGames: { SDK: {
 const bridge = await import('../js/crazygames.js?reward=' + Date.now());
 await bridge.initCrazyGames();
 assert.equal(bridge.crazyGamesRewardedAdsAvailable(), true);
+globalThis.window.ACE_OF_SKY_BASIC_LAUNCH = true;
+assert.equal(bridge.crazyGamesRewardedAdsAvailable(), false, 'Basic Launch hides the rewarded offer');
+globalThis.window.ACE_OF_SKY_BASIC_LAUNCH = false;
 
 let starts = 0;
 const success = bridge.requestCrazyGamesRewardedAd(() => starts++);

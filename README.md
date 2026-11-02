@@ -64,6 +64,9 @@ Editable source still runs with `python3 serve.py 8126`; no npm install is requi
 Run `node --test tests/*.test.mjs` for regression checks. To generate a smaller
 CrazyGames upload, run `node scripts/build-release.mjs`. It bundles/minifies the
 game and styles, removes unused library code, and writes a ZIP in `releases/`.
+For a Basic Launch submission, pass `--basic-launch` after the output ZIP path;
+this hides the rewarded-ad offer while CrazyGames ads are disabled. Use a
+regular build when CrazyGames enables ads for Full Launch.
 The pinned build tool uses npm's external cache (or `ESBUILD_BIN`); it does not
 install a dependency tree inside this folder. Existing ZIPs are never overwritten.
 

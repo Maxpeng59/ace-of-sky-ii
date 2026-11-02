@@ -131,7 +131,10 @@ export function crazyGamesGameplayStop(){
 }
 
 export function crazyGamesRewardedAdsAvailable(){
-  return enabled && !rewardedAdsDisabled && !!(sdk && sdk.ad && typeof sdk.ad.requestAd === 'function');
+  // CrazyGames disables ads during Basic Launch. The submission ZIP sets this
+  // flag so players never see an offer that cannot play in that phase.
+  return enabled && !globalThis.window?.ACE_OF_SKY_BASIC_LAUNCH && !rewardedAdsDisabled
+    && !!(sdk && sdk.ad && typeof sdk.ad.requestAd === 'function');
 }
 
 // The SDK's completion callback is the only proof that a rewarded ad was watched.

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const output = resolve(process.argv[2] || join(root, 'releases', `Ace-of-Sky-II-optimized-${new Date().toISOString().slice(0,10)}.zip`));
+const basicLaunch = process.argv.includes('--basic-launch');
 if (!output.endsWith('.zip')) throw new Error('Output must be a .zip file');
 if (await access(output).then(() => true, () => false)) throw new Error(`Refusing to overwrite ${output}`);
 const stage = await mkdtemp(join(tmpdir(), 'ace-sky-release-'));
@@ -26,14 +27,16 @@ try {
   const html = (await readFile(join(root,'index.html'),'utf8'))
     .replace(/<script type="importmap">[\s\S]*?<\/script>\s*/, '')
     .replace(/css\/style\.css\?v=[^" ]+/, 'style.css')
-    .replace(/js\/main\.js\?v=[^" ]+/, 'game.js');
+    .replace(/js\/main\.js\?v=[^" ]+/, 'game.js')
+    .replace('<script src="https://sdk.crazygames.com/crazygames-sdk-v3.js"></script>',
+      `${basicLaunch ? '<script>window.ACE_OF_SKY_BASIC_LAUNCH = true;</script>\n' : ''}<script src="https://sdk.crazygames.com/crazygames-sdk-v3.js"></script>`);
   await writeFile(join(stage,'index.html'), html);
   await mkdir(join(stage,'assets'));
   await copyFile(join(root,'assets/menu-music.mp3'), join(stage,'assets/menu-music.mp3'));
   await mkdir(dirname(output), { recursive: true });
   run('zip', ['-q', '-9', '-r', output, 'index.html', 'game.js', 'style.css', 'assets'], stage);
   run('unzip', ['-t', output]);
-  console.log(JSON.stringify({ output, javascriptBytes: (await stat(join(stage,'game.js'))).size,
+  console.log(JSON.stringify({ output, basicLaunch, javascriptBytes: (await stat(join(stage,'game.js'))).size,
     zipBytes: (await stat(output)).size }, null, 2));
 } finally {
   // Only the unique staging directory created above, never a user-supplied path.
