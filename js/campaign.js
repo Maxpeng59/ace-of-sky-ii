@@ -18,7 +18,7 @@ import {
   importCode, STOCK_DESIGNS, stockGet, uid, bus,
 } from './core.js';
 import { Hangar } from './hangar.js';
-import { Battle } from './battle.js?v=20261030-10p';
+import { Battle } from './battle.js';
 import { Menu } from './menu.js';
 
 // ---------------------------------------------------------------------------
@@ -446,7 +446,7 @@ function onboardIntro(){
 }
 
 function onboardTutorial(){
-  const body = `<b>Controls</b><br>· <b>Mouse</b> — aim; your nose chases the reticle.<br>· <b>Shift</b> — boost · <b>S</b> — brake · <b>Z</b> — cut engine to glide.<br>· <b>Left click</b> — guns. <b>Hold</b> on a target to build a missile lock, release to fire.<br>· <b>P</b> — aim-assist (snaps guns to the lead point) · <b>B</b> — airbrake.<br><br>Target: a single <b>target drone</b>. Get on its tail and put it down.`;
+  const body = `<b>Controls</b><br>· <b>Mouse</b> — aim; your nose chases the reticle.<br>· <b>Shift</b> — boost · <b>W / ↑</b> — full power · <b>S / ↓</b> — brake · <b>X</b> — cut engine to glide.<br>· <b>Left click</b> — guns. <b>Hold</b> on a target to build a missile lock, release to fire.<br>· <b>P</b> — aim-assist (snaps guns to the lead point) · <b>B</b> — airbrake.<br><br>Target: a single <b>target drone</b>. Get on its tail and put it down.`;
   root.appendChild(onboardPanel('Training Flight', 'Intercept the drone', body, 'Launch ▸', () => {
     const falcon = ensureFalcon();
     launchTutorialBattle(falcon);

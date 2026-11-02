@@ -10,3 +10,10 @@ __pycache__/
 
 # Separate Sites checkout for the official hosted multiplayer relay
 multiplayer-relay/
+
+# Generated build output and promotional media are not game source.
+dist/
+releases/
+tmp/
+assets/portal/
+node_modules/

@@ -9,8 +9,8 @@ import { load, bus } from './core.js';
 import { Menu } from './menu.js';
 import { Music } from './music.js';
 import { toast } from './util.js';
-import { Pvp } from './pvp.js?v=20261030-10p';
-import { initCrazyGames, crazyGamesLaunch, onCrazyGamesJoin } from './crazygames.js?v=20261030-cgmp';
+import { Pvp } from './pvp.js';
+import { initCrazyGames, crazyGamesLaunch, onCrazyGamesJoin } from './crazygames.js';
 
 // surface any uncaught error on-screen — invaluable while integrating modules
 function fatal(msg, detail){

@@ -7,6 +7,7 @@ let enabled = false;
 let instant = false;
 let inviteParams = null;
 let username = '';
+let gameplayActive = false;
 const joinListeners = new Set();
 
 function cleanLaunchParams(value){
@@ -34,6 +35,7 @@ function isCrazyGamesRuntime(){
 }
 
 export async function initCrazyGames(){
+  gameplayActive = false;
   sdk = globalThis.window && window.CrazyGames && window.CrazyGames.SDK;
   // The SDK's init handshake intentionally waits for the CrazyGames parent.
   // Skip it on independent hosts (for example GitHub Pages), where URL invite
@@ -114,9 +116,12 @@ export function crazyGamesInviteLink(room, mode){
 }
 
 export function crazyGamesGameplayStart(){
-  if (enabled && game && typeof game.gameplayStart === 'function') try { game.gameplayStart(); } catch (e){}
+  if (gameplayActive || !enabled || !game || typeof game.gameplayStart !== 'function') return;
+  try { game.gameplayStart(); gameplayActive = true; } catch (e){}
 }
 
 export function crazyGamesGameplayStop(){
+  if (!gameplayActive) return;
+  gameplayActive = false;
   if (enabled && game && typeof game.gameplayStop === 'function') try { game.gameplayStop(); } catch (e){}
 }

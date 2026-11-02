@@ -18,7 +18,7 @@ import {
 import { statLine, navalCruise } from './physics.js';
 import { $, el, clear, show, hide, toast, sfx, clamp, fmtTime } from './util.js';
 import { Hangar } from './hangar.js';
-import { Battle } from './battle.js?v=20261030-10p';
+import { Battle } from './battle.js';
 import { Menu } from './menu.js';
 import {
   DEPLOY_LIMIT, DEFAULT_DEPLOYMENT, clampDeploymentPoint, deploymentDistance,
@@ -94,8 +94,7 @@ export const Creative = {
     // a couple of global shortcuts while on this screen
     keyHandler = (e) => {
       if (e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
-      if (e.key === 'Escape') back();
-      else if (e.key === 'Enter') launch();
+      if (e.key === 'Enter') launch();
     };
     addEventListener('keydown', keyHandler);
   },
@@ -847,7 +846,7 @@ function launch(){
     toast('Could not start battle: ' + (e && e.message ? e.message : 'error'), 'bad');
     // restore our screen
     show(root);
-    keyHandler = (ev) => { if (ev.target && /INPUT|TEXTAREA|SELECT/.test(ev.target.tagName)) return; if (ev.key === 'Escape') back(); else if (ev.key === 'Enter') launch(); };
+    keyHandler = (ev) => { if (ev.target && /INPUT|TEXTAREA|SELECT/.test(ev.target.tagName)) return; if (ev.key === 'Enter') launch(); };
     addEventListener('keydown', keyHandler);
   }
 }

@@ -14,8 +14,8 @@
 //      regime below stats.vStall, turn rates from stats.agility, fuel burn,
 //      thermoStep heat → overheat damage, durability HP pool, armor soak,
 //      gravity, and ground/sea collision.
-//    - Player controls: W/S throttle, mouse pitch+yaw (invertY respected),
-//      A/D roll, Shift boost, Space fire (Balloon: bomb), Tab/Q/E cycle weapon,
+//    - Player controls: W/S or arrow-key throttle, mouse pitch+yaw (invertY respected),
+//      A/D or arrow-key roll, Shift boost, Space fire (Balloon: bomb), Tab/Q/E cycle weapon,
 //      Balloon P cycle weapon, F flares,
 //      G jettison drop tanks. Chase camera with lag + shake.
 //    - Combat: guns (fast tracer projectiles), missiles (homeMissile),
@@ -35,8 +35,8 @@
 import * as THREE from 'three';
 import { clamp, lerp, dampF, $, el, show, hide, sfx, toast, fmtNum, mulberry32 } from './util.js';
 import { computeStats, dragForce, thermoStep, partCenter, navalCruise, balloonVerticalAccel, balloonYawRate, trimmedLiftLoad, AMBIENT_TEMP, OVERHEAT_TEMP, RHO } from './physics.js';
-import { PARTS } from './parts.js';
-import { State, importCode, exportCode, stockGet } from './core.js';
+import { PARTS, applyAirframeFinish } from './parts.js';
+import { State, save, importCode, exportCode, stockGet } from './core.js';
 import { setScene, onFrame, resetView, getRenderer } from './engine.js';
 import {
   LockSystem, leadPoint, homeMissile, drawPrediction, drawLockReticle,
@@ -46,6 +46,11 @@ import { Music } from './music.js';
 import { buildDamageZoneHitboxes, hitDamageZone as intersectDamageZone } from './damage-zones.js';
 import { normalizeDeployment, deploymentYaw, formationPosition } from './deployment.js';
 import { seaWaveHeight, sampleSeaWave } from './water.js';
+import { mergeRigidMeshes } from './mesh-batch.js';
+import { crazyGamesGameplayStart, crazyGamesGameplayStop } from './crazygames.js';
+import { FlightDeck } from './flight-deck.js';
+import { FlightDirector, FLIGHT_ACTIONS, wrapAngle } from './flight-controls.js';
+import { FlightTutorial } from './flight-tutorial.js';
 
 // ---------------------------------------------------------------------------
 //  Environment presets — sky gradient, sun, fog and surface look per env.
@@ -173,6 +178,68 @@ function makeGroundTex(baseHex){
   return tex;
 }
 
+// Soft procedural cloud sheet. A few overlapping radial puffs on one reusable
+// texture produce atmospheric depth without adding external image downloads.
+function makeCloudTex(){
+  const W = 512, H = 256, cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const c2 = cv.getContext('2d');
+  c2.clearRect(0, 0, W, H);
+  const puffs = [
+    [0.24,0.60,0.23,0.30],[0.39,0.48,0.27,0.38],[0.55,0.54,0.30,0.42],
+    [0.70,0.60,0.24,0.34],[0.49,0.68,0.40,0.28],[0.82,0.68,0.17,0.23],
+  ];
+  for (const [x,y,rx,ry] of puffs){
+    c2.save(); c2.translate(x * W, y * H); c2.scale(rx * W, ry * H);
+    const g = c2.createRadialGradient(0, 0, 0, 0, 0, 1);
+    g.addColorStop(0, 'rgba(255,255,255,.92)');
+    g.addColorStop(.52, 'rgba(245,249,255,.62)');
+    g.addColorStop(1, 'rgba(230,239,248,0)');
+    c2.fillStyle = g; c2.beginPath(); c2.arc(0, 0, 1, 0, Math.PI * 2); c2.fill(); c2.restore();
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  if ('colorSpace' in tex) tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+// One low-draw-call ring of distant ridges breaks up the ruler-flat horizon.
+// The fog blends it naturally into each environment's sky colour.
+function makeMountainRing(baseHex, seed = 7719){
+  const rnd = mulberry32(seed), pos = [], col = [];
+  const base = new THREE.Color(baseHex).multiplyScalar(0.55);
+  const peak = base.clone().lerp(new THREE.Color(0xc7d1c6), 0.26);
+  const tri = (a,b,c, ca,cb,cc) => {
+    pos.push(...a, ...b, ...c);
+    for (const v of [ca,cb,cc]) col.push(v.r, v.g, v.b);
+  };
+  const N = 96, raw = Array.from({ length: N }, () => rnd());
+  const ridgeH = raw.map((_,i) => {
+    const sm = raw[(i + N - 2) % N] + raw[(i + N - 1) % N] + raw[i] * 1.8 + raw[(i + 1) % N] + raw[(i + 2) % N];
+    return 135 + (sm / 5.8) * 610;
+  });
+  const ridgeR = Array.from({ length: N }, () => 4400 + (rnd() - .5) * 520);
+  const point = (i, r, y) => {
+    const th = ((i % N) / N) * Math.PI * 2;
+    return [Math.sin(th) * r, y, Math.cos(th) * r];
+  };
+  for (let i = 0; i < N; i++){
+    const j = (i + 1) % N;
+    const innerA = point(i, 3500, -30), innerB = point(j, 3500, -30);
+    const ridgeA = point(i, ridgeR[i], ridgeH[i]), ridgeB = point(j, ridgeR[j], ridgeH[j]);
+    const outerA = point(i, 5450, -35), outerB = point(j, 5450, -35);
+    tri(innerA, innerB, ridgeA, base, base, peak);
+    tri(innerB, ridgeB, ridgeA, base, peak, peak);
+    tri(ridgeA, ridgeB, outerA, peak, peak, base);
+    tri(ridgeB, outerB, outerA, peak, base, base);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  geo.computeVertexNormals();
+  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 0, flatShading: true, fog: true });
+  const mesh = new THREE.Mesh(geo, mat); mesh.receiveShadow = false; mesh.castShadow = false;
+  return mesh;
+}
+
 // headings/speeds (a living sea instead of a flat, icy plane). Heights stay small
 // vs the play scale, so the +8 m float clearance keeps the collision feel intact.
 function updateSeaGeo(geo, base, t){
@@ -204,107 +271,21 @@ const _turretLead = new THREE.Vector3();
 // part into one geometry per distinct material appearance — turning ~250 draw calls per
 // craft into ~10. WEAPON parts (their nodes are referenced for muzzles/turret traverse)
 // and JETTISON drop-tanks are kept as separate nodes; everything else is baked flat.
-function _bucket(x){ return Math.round((x || 0) * 4) / 4; }     // quantise metal/rough to 0.25 steps so
-function _matKey(m){                                            // near-identical materials merge into one group
-  return (m.color ? m.color.getHexString() : '') + '|' + _bucket(m.metalness) + '|' + _bucket(m.roughness) + '|' +
-    (m.transparent ? 't' + _bucket(m.opacity == null ? 1 : m.opacity) : 'o') + '|' + (m.emissive ? m.emissive.getHexString() : '') + '|' +
-    (Math.round(m.emissiveIntensity || 0)) + '|' + (m.side || 0);
-}
 function mergeStaticMeshes(group){
-  group.updateMatrixWorld(true);
-  const collect = [];
-  for (const child of [...group.children]){
-    const k = child.userData && child.userData.partKey;
-    const def = k ? PARTS[k] : null;
-    // a TURRET traverses its barrels and a JETTISONable drop-tank disappears — both keep their
-    // own meshes. Everything else (incl. fixed manual weapons, whose barrels don't move) is baked.
-    if (def && (def.autoTurret || def.jettison)) continue;
-    child.updateMatrixWorld(true);
-    child.traverse(o => { if (o.isMesh && o.geometry) collect.push(o); });
-    const isWeapon = def && (def.category === 'gun' || def.category === 'missile' || def.category === 'bomb');
-    if (isWeapon) child.clear();   // a fixed weapon: bake its visual but KEEP the empty node (claimNode/muzzle resolve its mount)
-    else group.remove(child);
+  const meshes = [];
+  for (const child of group.children){
+    const def = PARTS[child.userData?.partKey];
+    if (def?.autoTurret || def?.jettison) continue;
+    child.traverse(o => { if (o.isMesh) meshes.push(o); });
   }
-  if (collect.length < 8) { collect.forEach(o => group.add(o)); return; }   // not worth it
-  const groups = new Map();
-  for (const m of collect){
-    const mat = Array.isArray(m.material) ? m.material[0] : m.material;
-    if (!mat) continue;
-    const key = _matKey(mat);
-    let e = groups.get(key); if (!e){ e = { mat, list: [] }; groups.set(key, e); }
-    e.list.push(m);
-  }
-  const inv = new THREE.Matrix4().copy(group.matrixWorld).invert(), mtx = new THREE.Matrix4();
-  for (const { mat, list } of groups.values()){
-    const pos = [], nor = [];
-    for (const m of list){
-      let g = m.geometry;
-      if (!g.getAttribute('normal')) g.computeVertexNormals();
-      const ng = g.index ? g.toNonIndexed() : g.clone();
-      ng.applyMatrix4(mtx.multiplyMatrices(inv, m.matrixWorld));
-      const p = ng.getAttribute('position'), nn = ng.getAttribute('normal');
-      for (let i = 0; i < p.count; i++){ pos.push(p.getX(i), p.getY(i), p.getZ(i)); nor.push(nn.getX(i), nn.getY(i), nn.getZ(i)); }
-      ng.dispose();
-    }
-    const geom = new THREE.BufferGeometry();
-    geom.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    geom.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
-    const mesh = new THREE.Mesh(geom, mat.clone());
-    mesh.castShadow = true; mesh.receiveShadow = false;
-    group.add(mesh);
-  }
-  for (const m of collect){                                     // free the originals' GPU buffers
-    if (m.geometry && m.geometry.dispose) m.geometry.dispose();
-    const mats = Array.isArray(m.material) ? m.material : [m.material];
-    mats.forEach(mm => mm && mm.dispose && mm.dispose());
-  }
+  mergeRigidMeshes(THREE, group, meshes);
 }
 
-// Collapse ONE auto-turret node's sub-meshes (ring/dome/barrels/muzzle — 6-24 of them) into a
-// handful of per-material meshes, IN THE NODE'S OWN LOCAL FRAME, re-added under the still-
-// traversable node. mergeStaticMeshes keeps turret nodes whole so they can aim; this bakes
-// their *internal* rigid geometry so a warship's many guns stop submitting hundreds of tiny
-// draw calls. Never touches node.position/quaternion/userData.partKey, so updateTurrets'
-// aim + muzzle math (which read only those) are byte-identical. Call AFTER claimNode.
 function mergeTurretNode(node){
   if (!node) return;
-  node.updateMatrixWorld(true);
-  const collect = [];
-  node.traverse(o => { if (o.isMesh && o.geometry) collect.push(o); });
-  if (collect.length < 4) return;                              // trivial/empty node — not worth it
-  const nodeInv = new THREE.Matrix4().copy(node.matrixWorld).invert(), mtx = new THREE.Matrix4();
-  const groups = new Map();
-  for (const m of collect){
-    const mat = Array.isArray(m.material) ? m.material[0] : m.material;
-    if (!mat) continue;
-    const key = _matKey(mat);
-    let e = groups.get(key); if (!e){ e = { mat, list: [] }; groups.set(key, e); }
-    e.list.push(m);
-  }
-  for (const c of [...node.children]) node.remove(c);
-  for (const { mat, list } of groups.values()){
-    const pos = [], nor = [];
-    for (const m of list){
-      const g = m.geometry;
-      if (!g.getAttribute('normal')) g.computeVertexNormals();
-      const ng = g.index ? g.toNonIndexed() : g.clone();
-      ng.applyMatrix4(mtx.multiplyMatrices(nodeInv, m.matrixWorld));     // into the node's local frame
-      const p = ng.getAttribute('position'), nn = ng.getAttribute('normal');
-      for (let i = 0; i < p.count; i++){ pos.push(p.getX(i), p.getY(i), p.getZ(i)); nor.push(nn.getX(i), nn.getY(i), nn.getZ(i)); }
-      ng.dispose();
-    }
-    const geom = new THREE.BufferGeometry();
-    geom.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    geom.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
-    const mesh = new THREE.Mesh(geom, mat.clone());
-    mesh.castShadow = false; mesh.receiveShadow = false;       // turrets don't cast shadows (see buildAircraftMesh)
-    node.add(mesh);
-  }
-  for (const m of collect){                                    // free the originals' GPU buffers
-    if (m.geometry && m.geometry.dispose) m.geometry.dispose();
-    const mats = Array.isArray(m.material) ? m.material : [m.material];
-    mats.forEach(mm => mm && mm.dispose && mm.dispose());
-  }
+  const meshes = [];
+  node.traverse(o => { if (o.isMesh) meshes.push(o); });
+  mergeRigidMeshes(THREE, node, meshes, false);
 }
 
 function buildAircraftMesh(design){
@@ -346,7 +327,6 @@ function buildAircraftMesh(design){
   // its descendants — checking only a mesh's own/parent partKey misses deeply-nested bits
   // (a jet's nozzle sub-meshes, a missile's body) and wrongly paints them.
   if (design && design.color){
-    const col = new THREE.Color(design.color);
     for (const partNode of group.children){
       const k = partNode.userData && partNode.userData.partKey;
       const cat = k ? PARTS[k]?.category : '';
@@ -354,12 +334,7 @@ function buildAircraftMesh(design){
       partNode.traverse(o => {
         if (!o.isMesh || !o.material || !o.material.color || o.userData.glow || o.material.transparent) return;
         o.material = o.material.clone();
-        o.material.color.copy(col);
-        // PAINT, not bare metal: a liveried surface is a dielectric coat over the airframe.
-        // Left at part-def metalness (0.5–0.9) it becomes a mirror of the bright PMREM sky
-        // and reads as GLOWING. Clamp painted skin to paint-like PBR values.
-        o.material.metalness = Math.min(o.material.metalness ?? 0.5, 0.32);
-        o.material.roughness = Math.max(o.material.roughness ?? 0.5, 0.55);
+        applyAirframeFinish(THREE, o.material, design.finish, design.color);
       });
     }
   }
@@ -460,7 +435,8 @@ export const Battle = {
     this._live = true;
     Music.pause();                            // hush the menu music for the fight
     this._S = new Sim(config);
-    this._S.boot();
+    try { this._S.boot(); }
+    catch (err){ this.stop(); throw err; }
   },
 
   stop(){
@@ -474,7 +450,7 @@ export const Battle = {
 // ===========================================================================
 //  Sim — owns the whole battle. One instance per Battle.start().
 // ===========================================================================
-class Sim {
+export class Sim {
   constructor(config){
     this.cfg = config;
     this.env = ENVS[config.env] || ENVS.day;
@@ -522,6 +498,11 @@ class Sim {
     this.mouseFire = false;
     this.bombPulse = false;
     this.assistOn = false;                // P: auto-aim guns at the lead point on lock
+    this.guideOpen = false;
+    this.tutorial = new FlightTutorial(!config.net && (config.showGuide === true || !State.settings?.flightTutorialV2));
+    this.director = new FlightDirector();
+    this.autoRoll = 0;
+    this.gameplayActive = false;
 
     // camera state
     this.camPos = new THREE.Vector3();
@@ -570,6 +551,7 @@ class Sim {
     this.buildWorld();
     this.buildHUD();
     this.spawnAll();
+    this.buildTutorialHint();
     if (this.net && Array.isArray(this.cfg.networkPlayers)) this.spawnNetworkPlayers(this.cfg.networkPlayers);
     this.bindInput();
     this.world.player = this.player;
@@ -591,7 +573,20 @@ class Sim {
       if (!Array.isArray(this.cfg.networkPlayers)) this.sendFleet();
     }
 
-    toast(this.objective.label || objectiveLabel(this.objective), '');
+    if (this.tutorial.stage === 'off') toast(this.objective.label || objectiveLabel(this.objective), '');
+    if (!this.guideOpen) this.beginGameplay();
+  }
+
+  beginGameplay(){
+    if (this.gameplayActive) return;
+    this.gameplayActive = true;
+    crazyGamesGameplayStart();
+  }
+
+  finishGameplay(){
+    if (!this.gameplayActive) return;
+    this.gameplayActive = false;
+    crazyGamesGameplayStop();
   }
 
   // ---------------------------------------------------------------------
@@ -684,6 +679,30 @@ class Sim {
       pm.dispose(); eg.dispose(); em.dispose();
     }
 
+    // atmospheric depth: distant ridges and layered clouds keep the combat view
+    // from reading as a bare coloured plane under an empty sky.
+    if (!env.sea){
+      const ridges = makeMountainRing(env.ground, this.cfg.env === 'dusk' ? 8801 : 7719);
+      scene.add(ridges); this.ridges = ridges;
+    }
+    if (!env.stars){
+      const cloudTex = makeCloudTex();
+      const cloudMat = new THREE.SpriteMaterial({
+        map: cloudTex, color: this.cfg.env === 'dusk' ? 0xffd0b2 : 0xffffff,
+        transparent: true, opacity: this.cfg.env === 'dusk' ? 0.34 : 0.46,
+        depthWrite: false, fog: true,
+      });
+      const clouds = new THREE.Group(), rnd = mulberry32(this.cfg.env === 'sea' ? 9821 : 6247);
+      for (let i = 0; i < 34; i++){
+        const th = rnd() * Math.PI * 2, r = 900 + rnd() * 6500;
+        const sp = new THREE.Sprite(cloudMat);
+        sp.position.set(Math.sin(th) * r, 680 + rnd() * 1250, Math.cos(th) * r);
+        const w = 420 + rnd() * 760; sp.scale.set(w, w * (0.24 + rnd() * .10), 1);
+        clouds.add(sp);
+      }
+      scene.add(clouds); this.clouds = clouds; this.cloudTex = cloudTex;
+    }
+
     // ground / sea — a big plane with subtle detail
     const size = 24000;
     const segs = env.sea ? 96 : 64;                  // finer mesh on water so swells read; 96 is plenty for a backdrop (160 was ~26k verts — needless cost)
@@ -719,9 +738,10 @@ class Sim {
       });
     } else {
       const gt = makeGroundTex(env.ground);
-      gt.repeat.set(30, 30);
+      gt.repeat.set(20, 20);
       groundMat = new THREE.MeshStandardMaterial({
-        color: 0xffffff, map: gt, metalness: 0.0, roughness: 0.95, envMapIntensity: 0.7,
+        color: 0xffffff, map: gt, metalness: 0.0, roughness: 0.93, envMapIntensity: 0.72,
+        emissive: new THREE.Color(env.ground).multiplyScalar(0.12), emissiveIntensity: 0.32,
       });
     }
     const ground = new THREE.Mesh(geo, groundMat);
@@ -730,12 +750,8 @@ class Sim {
     this.ground = ground;
     this.groundY = 0;
 
-    // grid-ish reference lines on land so motion/altitude reads clearly
-    if (!env.sea){
-      const grid = new THREE.GridHelper(size, 120, 0x2a3a2a, 0x1a241a);
-      grid.position.y = 1; grid.material.opacity = 0.25; grid.material.transparent = true;
-      scene.add(grid);
-    }
+    // No debug-style world grid: the terrain texture and ridge line carry speed
+    // and altitude cues without making the finished game look like an editor view.
   }
 
   // ---------------------------------------------------------------------
@@ -894,11 +910,9 @@ class Sim {
     // Balloon has dedicated lift keys, a direct bomb trigger, and P for weapon cycling
     // because Q/E are reserved for vertical control.
     if (this._helpEl && this.player && this.player.isBalloon){
-      this._helpEl.innerHTML = '<b>A / D</b> turn left / right · <b>MOUSE</b> aim · <b>CLICK</b> fire · <b>Q</b> climb · <b>E</b> descend · <b>SPACE</b> bomb · ' +
-        '<b>P</b> switch weapon · <b>SHIFT</b> boost · <b>S</b> brake · <b>Z</b> engine on/off · <b>B</b> airbrake · <b>V</b> bombard view';
+      this._helpEl.innerHTML = '<b>A / D</b> TURN · <b>Q / E</b> ALTITUDE · <b>SPACE</b> BOMB · <b>P</b> WEAPON · <b>SHIFT</b> BOOST · <b>SHIFT+R</b> MENU';
     } else if (this._helpEl && this.player && this.player.isShipCraft){
-      this._helpEl.innerHTML = '<b>A / D</b> steer port / starboard · <b>W / S</b> flank / slow · <b>Z</b> stop engines · ' +
-        '<b>CLICK</b> fire selected manual weapon · automatic turrets acquire and fire by role · <b>TAB</b>/<b>Q</b>/<b>E</b> weapon';
+      this._helpEl.innerHTML = '<b>A / D</b> STEER · <b>W / S</b> THROTTLE · <b>X</b> ENGINE · <b>CLICK</b> FIRE · <b>TAB</b> WEAPON · <b>SHIFT+R</b> MENU';
     }
   }
 
@@ -1170,7 +1184,7 @@ class Sim {
       <div class="hud-bar"><i class="boost" style="width:100%"></i></div>
       <div class="hud-bar-label"><span>HEAT</span><span class="v-heat"></span></div>
       <div class="hud-bar"><i class="heat" style="width:0%"></i></div>
-      <div class="hud-weapon v-weapon">—</div>`;
+      `;
     hud.appendChild(bl);
 
     // top-left: speed/alt/throttle
@@ -1205,8 +1219,7 @@ class Sim {
 
     // controls legend — fades out a few seconds into the sortie
     const help = el('div', 'hud-help');
-    help.innerHTML = '<b>MOUSE</b> aim &amp; fly (nose chases the reticle) · <b>SHIFT</b> boost · <b>S</b> brake · <b>Z</b> engine on/off · ' +
-      '<b>B</b> airbrake · <b>V</b> bombard view · <b>SPACE</b> fire · <b>P</b> aim-assist · <b>TAB</b>/<b>Q</b>/<b>E</b> weapon · <b>F</b> flares · <b>G</b> drop tanks · click to capture mouse';
+    help.innerHTML = '<b>MOUSE</b> AIM &amp; FLY · <b>CLICK / SPACE</b> FIRE · <b>SHIFT</b> BOOST · <b>TAB</b> WEAPON · <b>SHIFT+R</b> MENU';
     hud.appendChild(help);
     this._helpEl = help;
     this._helpT1 = setTimeout(() => help.classList.add('fade'), 6500);
@@ -1217,12 +1230,112 @@ class Sim {
       fuel: bl.querySelector('.fuel'), fuelv: bl.querySelector('.v-fuel'),
       boost: bl.querySelector('.boost'), boostv: bl.querySelector('.v-boost'),
       heat: bl.querySelector('.heat'), heatv: bl.querySelector('.v-heat'),
-      weapon: bl.querySelector('.v-weapon'),
       spd: tl.querySelector('.v-spd'), alt: tl.querySelector('.v-alt'), thr: tl.querySelector('.v-thr'), mach: tl.querySelector('.v-mach'),
       obj: tc.querySelector('.v-obj'), objsub: tc.querySelector('.v-objsub'),
       msg, hitmarker,
     };
     this.dom.obj.textContent = objectiveLabel(this.objective);
+    this.flightDeck = new FlightDeck(hud, id => this.selectFlightAction(id), () => this.cycleWeapon(1));
+  }
+
+  clearFlightInput(){
+    this.keys = Object.create(null);
+    this.mouseFire = this.firePulse = this.bombPulse = false;
+    if (this.player) this.player.wantGun = this.player.wantMissile = this.player.wantBomb = false;
+  }
+
+  buildTutorialHint(){
+    if (this.tutorial.stage === 'off') return;
+    const hint = el('div', 'flight-tutorial-hint');
+    hint.innerHTML = '<span class="tutorial-step">01 / FLY</span><b></b><span class="tutorial-detail"></span><button type="button">Skip tutorial</button>';
+    hint.querySelector('b').textContent = this.player.isShipCraft ? 'A / D to steer' : this.player.isBalloon ? 'A / D to turn · Q / E to climb or descend' : 'Click the sky, then move the mouse to fly';
+    hint.querySelector('.tutorial-detail').textContent = 'You are in control. A weapon lesson follows in a few seconds.';
+    hint.addEventListener('mousedown', e => e.stopPropagation());
+    hint.querySelector('button').addEventListener('click', () => this.skipFlightTutorial());
+    this.hud.appendChild(hint); this._tutorialHint = hint;
+  }
+
+  pauseWeaponLesson(){
+    this.guideOpen = true;
+    this.clearFlightInput(); this.finishGameplay();
+    if (document.pointerLockElement) document.exitPointerLock();
+    this._tutorialHint?.classList.add('hidden');
+    this._hudNext = 0;
+    this.buildFlightGuide();
+  }
+
+  buildFlightGuide(){
+    if (!this.hud) return;
+    const guide = el('div', 'flight-guide');
+    guide.setAttribute('role', 'dialog'); guide.setAttribute('aria-modal', 'true');
+    guide.setAttribute('aria-label', 'Weapon switching lesson');
+    guide.innerHTML = `
+      <div class="flight-guide-card">
+        <div class="eyebrow">02 / WEAPONS · SIMULATION PAUSED</div>
+        <h2>Switch your weapon</h2>
+        <p>The fight is frozen. Press <kbd>TAB</kbd> to cycle your loadout.</p>
+        <div class="tutorial-weapon-demo"><span class="kbd">TAB</span><span>→</span><b class="lesson-weapon"></b></div>
+        <p class="lesson-instruction">Try it now. Your weapon silhouette and ammunition are below, beside the navball.</p>
+        <div class="lesson-buttons">
+          <button type="button" class="btn lesson-switch">SWITCH WEAPON</button>
+          <button type="button" class="btn accent lesson-resume">RESUME FLIGHT</button>
+        </div>
+        <button type="button" class="lesson-skip">Skip tutorial</button>
+      </div>`;
+    guide.addEventListener('mousedown', e => e.stopPropagation());
+    guide.querySelector('.lesson-switch').addEventListener('click', () => this.cycleWeapon(1));
+    guide.querySelector('.lesson-resume').addEventListener('click', () => this.dismissFlightGuide());
+    guide.querySelector('.lesson-skip').addEventListener('click', () => this.skipFlightTutorial());
+    this.hud.appendChild(guide);
+    this._guideEl = guide;
+    this.updateWeaponLesson();
+    guide.querySelector(this.player.weapons.length > 1 ? '.lesson-switch' : '.lesson-resume').focus();
+  }
+
+  updateWeaponLesson(){
+    if (!this._guideEl) return;
+    const p = this.player, multiple = p.weapons.length > 1;
+    this._guideEl.querySelector('.lesson-weapon').textContent = p.weapons[p.curWeapon]
+      ? `${p.weapons[p.curWeapon].name} · ${p.curWeapon + 1}/${p.weapons.length}` : 'No manual weapon fitted';
+    this._guideEl.querySelector('.lesson-switch').disabled = !multiple;
+    this._guideEl.querySelector('.lesson-resume').disabled = multiple && !this.tutorial.switched;
+    this._guideEl.querySelector('.lesson-instruction').textContent = !multiple
+      ? 'This craft has fewer than two manual weapons. You can continue without switching.'
+      : this.tutorial.switched ? 'Weapon changed. Resume when you are ready — click or press Space to fire.'
+      : 'Try it now. Your weapon silhouette and ammunition are below, beside the navball.';
+  }
+
+  rememberFlightTutorial(){
+    State.settings ||= {};
+    State.settings.flightTutorialV2 = true; State.settings.flightGuideSeen = true;
+    save();
+  }
+
+  skipFlightTutorial(){
+    this.tutorial.skip(); this.rememberFlightTutorial(); this.resumeFromLesson();
+    this._tutorialHint?.remove(); this._tutorialHint = null;
+  }
+
+  dismissFlightGuide(){
+    if (!this.tutorial.resume(this.player.weapons.length)) return;
+    this.rememberFlightTutorial(); this.resumeFromLesson();
+    if (this._tutorialHint){
+      this._tutorialHint.classList.remove('hidden');
+      this._tutorialHint.querySelector('.tutorial-step').textContent = '03 / ENGAGE';
+      this._tutorialHint.querySelector('b').textContent = this.player.isBalloon ? 'Click to fire · Space to drop bombs' : 'Click / Space to fire';
+      this._tutorialHint.querySelector('.tutorial-detail').textContent = 'Navball: blue is sky · amber is ground · green marker is your flight path.';
+    }
+  }
+
+  resumeFromLesson(){
+    this.guideOpen = false;
+    if (this._guideEl){ this._guideEl.remove(); this._guideEl = null; }
+    this.clearFlightInput(); this._hudNext = 0; this.beginGameplay();
+    const cv = $('gl');
+    if (cv && cv.requestPointerLock){
+      try { const req = cv.requestPointerLock({ unadjustedMovement: false }); if (req && req.catch) req.catch(() => {}); }
+      catch (_){ /* pointer lock remains optional */ }
+    }
   }
 
   resizeHUD(){
@@ -1264,7 +1377,23 @@ class Sim {
 
   onKeyDown(e){
     const k = e.key.toLowerCase();
+    if ((e.ctrlKey || e.metaKey || e.altKey) && !(e.code === 'KeyW' && document.fullscreenElement)) return;
+    if (k === 'r' && e.shiftKey){ e.preventDefault(); this.endBattle(false, 'Returned to menu'); return; }
+    if (this.guideOpen){
+      const forward = k === 'tab' || (k === 'e' && !this.player.isBalloon) || (k === 'p' && this.player.isBalloon);
+      if (forward || (k === 'q' && !this.player.isBalloon)){
+        e.preventDefault(); if (!e.repeat) this.cycleWeapon(k === 'q' || e.shiftKey ? -1 : 1);
+      } else if (k === 'enter') { e.preventDefault(); this.dismissFlightGuide(); }
+      else if (k === ' ') e.preventDefault();
+      return;
+    }
     this.keys[k] = true;
+    if ((k === 'a' || k === 'd' || k === 'arrowleft' || k === 'arrowright') && !e.repeat) this.director.cancel();
+    const flightAction = FLIGHT_ACTIONS.find(a => a[2] === k);
+    if (flightAction){ e.preventDefault(); if (!e.repeat) this.selectFlightAction(flightAction[0]); return; }
+    // CrazyGames warns against binding Escape because it exits fullscreen. Keep
+    // browser behavior untouched and use Shift+R as the deliberate return action.
+    if ((e.ctrlKey || e.metaKey) && e.code === 'KeyW' && document.fullscreenElement) e.preventDefault();
     if ((k === ' ' || k === 'space' || k === 'spacebar') && !e.repeat){
       if (this.player && this.player.isBalloon) this.bombPulse = true;
       else this.firePulse = true;
@@ -1272,7 +1401,7 @@ class Sim {
     if (k === 'tab'){ e.preventDefault(); this.cycleWeapon(1); }
     else if (k === 'q' && !(this.player && this.player.isBalloon)){ this.cycleWeapon(-1); }
     else if (k === 'e' && !(this.player && this.player.isBalloon)){ this.cycleWeapon(1); }
-    else if (k === 'z'){ e.preventDefault(); this.toggleEngine(); }
+    else if (k === 'x'){ e.preventDefault(); this.toggleEngine(); }
     else if (k === 'b'){ this.toggleAirbrake(); }
     else if (k === 'v' && !e.repeat){ this.toggleBombView(); }
     else if (k === 'p' && this.player && this.player.isBalloon){
@@ -1281,7 +1410,6 @@ class Sim {
     else if (k === 'p'){ this.assistOn = !this.assistOn; this.flashMsg(this.assistOn ? 'AIM ASSIST ON' : 'AIM ASSIST OFF', this.assistOn ? 'good' : '', 1.0); }
     else if (k === 'f'){ this.firePlayerFlare(); }
     else if (k === 'g'){ this.jettison(this.player); }
-    else if (k === 'escape'){ this.endBattle(false, 'Aborted'); }
   }
 
   // Z toggles the engine master switch: ON spools to full thrust, OFF cuts to a glide.
@@ -1310,8 +1438,9 @@ class Sim {
   onKeyUp(e){ this.keys[e.key.toLowerCase()] = false; }
 
   onMouseMove(e){
-    if (!this.pointerLocked) return;
+    if (!this.pointerLocked || this.guideOpen) return;
     if (this.player && this.player.isShipCraft) return;          // the helm, not the mouse, turns a ship
+    if (e.movementX || e.movementY) this.director.cancel();
     const sens = 0.0026;
     const invert = State.settings && State.settings.invertY ? -1 : 1;
     // move a free reticle direction; the nose chases it (see integrate()).
@@ -1319,7 +1448,8 @@ class Sim {
     this.aimPitch = clamp(this.aimPitch - e.movementY * sens * invert, -1.2, 1.2);  // mouse up = look up
   }
   onMouseDown(e){
-    if (e.button !== 0) return;
+    if (e.button !== 0 || this.guideOpen) return;
+    if (e.target?.closest?.('button, input, select, .flight-deck, .flight-tutorial-hint')) return;
     // Left click is always a weapon trigger. On the first click it also asks the
     // browser to capture the mouse; firing still works if pointer lock is denied.
     this.mouseFire = true;
@@ -1343,18 +1473,32 @@ class Sim {
 
   cycleWeapon(dir){
     const p = this.player; if (!p || !p.weapons.length) return;
+    const before = p.curWeapon;
     p.curWeapon = (p.curWeapon + dir + p.weapons.length) % p.weapons.length;
+    this.tutorial.weaponChanged(before, p.curWeapon);
+    this.updateWeaponLesson(); this._hudNext = 0;
     this.lock.reset();
     sfx('ui', 0.3);
+  }
+
+  selectFlightAction(id){
+    if (this.guideOpen || this.over) return;
+    if (!this.director.select(id, this.player)){
+      this.flashMsg('MANEUVERS NEED STABLE, AIRBORNE FIXED-WING FLIGHT', 'warn', 1.5); return;
+    }
+    this._hudNext = 0;
   }
 
   // ---------------------------------------------------------------------
   //  MAIN FRAME
   // ---------------------------------------------------------------------
   frame(dt){
+    if (this.guideOpen){ this.renderHUD(0); return; }
     if (this.over){ this.renderHUD(dt); return; }
     if (!(dt > 0)) return;              // guard zero/negative dt (paused/odd clock)
     dt = Math.min(dt, 0.05);            // extra safety for the physics step
+    if (this.tutorial.advance(dt)){ this.pauseWeaponLesson(); this.renderHUD(0); return; }
+    if (this.tutorial.stage === 'done' && this._tutorialHint){ this._tutorialHint.remove(); this._tutorialHint = null; }
     this.time += dt;
     this.result.time = this.time;
     this.world.time = this.time;
@@ -1434,20 +1578,23 @@ class Sim {
     let tgt;
     if (!p.engineOn) tgt = 0;                                  // engine cut → glide
     else if (K['shift'] && p.fuel > 0) tgt = 1;                // boost
-    else if (K['s']) tgt = 0.35;                               // brake
-    else if (K['w']) tgt = 1;                                  // hold full power
+    else if (K['s'] || K['arrowdown']) tgt = 0.35;              // brake
+    else if (K['w'] || K['z'] || K['arrowup']) tgt = 1;         // full power (WASD, AZERTY, arrows)
     else tgt = 0.82;                                           // cruise
     p.throttleTarget = tgt;
     p.throttle = dampF(p.throttle, tgt, 2.4, dt);
     p.boost = !!K['shift'] && p.fuel > 0 && p.engineOn;
+    const command = this.director.update(dt, p);
+    this.autoRoll = command?.roll || 0;
+    if (command){ this.aimYaw = command.yaw; this.aimPitch = command.pitch; }
 
     // --- free-aim: the mouse moves a reticle DIRECTION; the nose chases it at the
     //     airframe's agility turn rate (the steering lives in integrate()). This is
     //     the Gravity Front "fly toward where you're looking" dogfight model. -----
     if (p.isShipCraft){
-      p.shipRudder = (K['d'] ? 1 : 0) - (K['a'] ? 1 : 0);       // A port, D starboard
+      p.shipRudder = ((K['d'] || K['arrowright']) ? 1 : 0) - ((K['a'] || K['arrowleft']) ? 1 : 0);
     } else if (p.isBalloon){
-      const rudder = (K['d'] ? 1 : 0) - (K['a'] ? 1 : 0);       // A left, D right
+      const rudder = ((K['d'] || K['arrowright']) ? 1 : 0) - ((K['a'] || K['arrowleft']) ? 1 : 0);
       this.aimYaw += rudder * BALLOON_AIM_TURN * dt;
       this.aimYaw = Math.atan2(Math.sin(this.aimYaw), Math.cos(this.aimYaw));
     }
@@ -1456,7 +1603,8 @@ class Sim {
     const cp = Math.cos(controlPitch);
     p.flyDir = (p.flyDir || new THREE.Vector3()).set(Math.sin(controlYaw) * cp, Math.sin(controlPitch), Math.cos(controlYaw) * cp);
     p.aimDir = (p.aimDir || new THREE.Vector3()).copy(p.flyDir);   // guns fire along the reticle (see fireWeapon)
-    p.manualRoll = (p.isBalloon || p.isShipCraft) ? 0 : (K['a'] ? 1 : 0) + (K['d'] ? -1 : 0); // balloons/ships use A/D as a rudder
+    p.manualRoll = (p.isBalloon || p.isShipCraft) ? 0
+      : ((K['a'] || K['arrowleft']) ? 1 : 0) + ((K['d'] || K['arrowright']) ? -1 : 0);
     const spaceHeld = !!(K[' '] || K['space'] || K['spacebar']);
     p.balloonClimb = !!p.isBalloon && !!K['q'];
     p.balloonDescend = !!p.isBalloon && !!K['e'] && !p.balloonClimb;
@@ -1526,6 +1674,9 @@ class Sim {
       const authority = clamp(up.y, 0, 1);               // fade near knife-edge/inverted so loops aren't fought
       let rollD = authority * clamp((bankWant - bankNow) * 3.0, -1, 1);
       if (c.isPlayer) rollD = clamp(rollD + (c.manualRoll || 0), -1, 1);   // manual roll layered on top
+      if (c.isPlayer && this.director.mode !== 'manual'){
+        rollD = this.autoRoll || clamp(wrapAngle(bankWant - bankNow) * 3, -1, 1);
+      }
       dRoll = rollD * ag.roll * DEG * dt;
       if (c.isPlayer){ c.ctrlPitch = pitchD; c.ctrlYaw = yawD; c.ctrlRoll = rollD; }        // expose to the HUD stick
     }
@@ -1538,6 +1689,7 @@ class Sim {
       ctrlScale = clamp(speed / Math.max(1, stallV), 0.15, 0.6);   // mushy controls
     }
     dPitch *= ctrlScale; dYaw *= ctrlScale; dRoll *= ctrlScale;
+    if (c.isPlayer && this.autoRoll) dRoll = this.director.consumeRoll(dRoll);
 
     // apply rotations in body frame: roll, then pitch, then yaw.
     // NOTE: a positive pitch DEMAND must raise the nose. Rotating about body +X
@@ -2306,14 +2458,21 @@ class Sim {
         e.parts.forEach((p, k) => { arr[k * 3] = p.pos.x; arr[k * 3 + 1] = p.pos.y; arr[k * 3 + 2] = p.pos.z; });
         e.mesh.material.opacity = clamp(e.life / e.maxLife, 0, 1);
       } else if (e.kind === 'boom'){
-        const s = lerp(e.from, e.to, 1 - e.life / e.maxLife);
+        const progress = 1 - e.life / e.maxLife;
+        const s = lerp(e.from, e.to, 1 - Math.pow(1 - progress, 2.2));
         e.mesh.scale.setScalar(s);
-        e.mesh.material.opacity = clamp(e.life / e.maxLife, 0, 1) * 0.9;
-        if (e.light) e.light.intensity = clamp(e.life / e.maxLife, 0, 1) * 6;
+        e.coreMat.opacity = Math.pow(1 - progress, 2.4);
+        e.fireMat.opacity = Math.pow(1 - progress, 1.45) * .86;
+        e.smokeMat.opacity = Math.sin(Math.min(1, progress * 1.6) * Math.PI) * .42;
+        e.smoke.scale.setScalar(1.55 + progress * .75);
+        if (e.light) e.light.intensity = Math.pow(1 - progress, 2) * 9;
       }
       if (e.life <= 0){
         this.scene.remove(e.mesh);
         if (e.mesh.material) e.mesh.material.dispose();
+        if (e.kind === 'boom'){
+          e.coreMat.dispose(); e.fireMat.dispose(); e.smokeMat.dispose();
+        }
         if (e.light) e.light.intensity = 0;        // return the pooled light (keep it in the scene)
         this.fx.splice(i, 1);
       }
@@ -2996,9 +3155,12 @@ class Sim {
     const cp = Math.cos(cameraPitch), sp = Math.sin(cameraPitch);
     const aimFwd = TMP.set(Math.sin(cameraYaw) * cp, sp, Math.cos(cameraYaw) * cp);
     const cm = (p.scaleMul || 1);                            // a piloted ship sits farther from the eye
-    const dollyBack = (30 + clamp(p.speed * 0.03, 0, 16)) * cm;
+    // Keep the player's aircraft large enough to read as the hero object. The old
+    // 30–46 m dolly made even the detailed Falcon look like a tiny grey speck.
+    const viewBase = p.isShipCraft ? 30 : (p.isBalloon ? 27 : 17);
+    const dollyBack = (viewBase + clamp(p.speed * 0.014, 0, 7)) * cm;
     const desired = TMP2.copy(p.pos).addScaledVector(aimFwd, -dollyBack);
-    desired.y += 11 * cm;
+    desired.y += (p.isShipCraft ? 10 : (p.isBalloon ? 8 : 5.7)) * cm;
     const surfY = this.surfaceHeight(p.pos.x, p.pos.z);
     if (desired.y < surfY + 6) desired.y = surfY + 6;        // keep the camera above the ground
     this.camPos.lerp(desired, 1 - Math.exp(-7 * dt));
@@ -3014,7 +3176,7 @@ class Sim {
     const look = TMP3.copy(this.camera.position).addScaledVector(aimFwd, 120);
     this.camera.lookAt(look);
     // boost narrows the FOV for a speed rush
-    this.camera.fov = lerp(this.camera.fov, p.boost ? 58 : 66, 1 - Math.exp(-4 * dt));
+    this.camera.fov = lerp(this.camera.fov, p.boost ? 59 : 63, 1 - Math.exp(-4 * dt));
     this.camera.updateProjectionMatrix();
   }
 
@@ -3056,16 +3218,21 @@ class Sim {
   }
 
   spawnExplosion(pos, scale = 1){
-    const mesh = new THREE.Mesh(
-      Sim.boomGeom || (Sim.boomGeom = new THREE.SphereGeometry(1, 12, 10)),
-      new THREE.MeshBasicMaterial({ color: 0xffaa44, transparent: true, opacity: 0.9 })
-    );
-    mesh.position.copy(pos);
+    const mesh = new THREE.Group();
+    const coreMat = new THREE.MeshBasicMaterial({ color: 0xfff2b0, transparent: true, opacity: 1, blending: THREE.AdditiveBlending, depthWrite: false });
+    const fireMat = new THREE.MeshBasicMaterial({ color: 0xff7a20, transparent: true, opacity: .86, blending: THREE.AdditiveBlending, depthWrite: false });
+    const smokeMat = new THREE.MeshBasicMaterial({ color: 0x2d3137, transparent: true, opacity: .46, depthWrite: false });
+    const core = new THREE.Mesh(Sim.boomGeom || (Sim.boomGeom = new THREE.SphereGeometry(1, 16, 12)), coreMat);
+    const fire = new THREE.Mesh(Sim.boomGeom, fireMat);
+    const smoke = new THREE.Mesh(Sim.boomGeom, smokeMat);
+    fire.scale.setScalar(1.3); smoke.scale.setScalar(1.55);
+    mesh.add(smoke, fire, core); mesh.position.copy(pos);
     this.scene.add(mesh);
     // borrow a free light from the pool (intensity ~0) — no scene add/remove, no recompile
     let light = null;
     if (this.boomLights){ light = this.boomLights.find(L => L.intensity < 0.05) || null; if (light) light.position.copy(pos); }
-    this.fx.push({ kind: 'boom', mesh, light, from: 1 * scale, to: 26 * scale, life: 0.6, maxLife: 0.6, t: 0 });
+    this.fx.push({ kind: 'boom', mesh, core, fire, smoke, coreMat, fireMat, smokeMat, light,
+      from: 1 * scale, to: 31 * scale, life: 0.9, maxLife: 0.9, t: 0 });
     this.spawnSpark(pos, 0xffcc66);
   }
 
@@ -3112,6 +3279,10 @@ class Sim {
   endBattle(win, reason){
     if (this.over) return;
     this.over = true;
+    this.tutorial.skip(); this.guideOpen = false;
+    this._guideEl?.remove(); this._guideEl = null;
+    this._tutorialHint?.remove(); this._tutorialHint = null;
+    this.finishGameplay();
     this.result.win = win;
     this.result.reason = reason;
     this.result.time = this.time;
@@ -3403,42 +3574,40 @@ class Sim {
         ctx.beginPath(); ctx.arc(W / 2, H / 2, 2, 0, 7); ctx.stroke();
         ctx.restore();
 
-        // ---- virtual control-stick + throttle (live input feedback) ----
-        const cx = W / 2, cy = H - 104, R = 34;
-        ctx.save();
-        ctx.lineWidth = 1.2;
-        ctx.strokeStyle = 'rgba(120,150,180,.30)';
-        ctx.strokeRect(cx - R, cy - R, R * 2, R * 2);
-        ctx.beginPath(); ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy); ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R); ctx.stroke();
-        const sx = cx + clamp(p.isBalloon ? p.ctrlYaw : p.ctrlRoll, -1, 1) * R;
-        const sy = cy - clamp(p.ctrlPitch, -1, 1) * R;      // up = nose-up demand
-        ctx.strokeStyle = 'rgba(57,255,136,.5)';
-        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(sx, sy); ctx.stroke();
-        ctx.fillStyle = p.stalled ? 'rgba(255,77,109,.95)' : 'rgba(57,255,136,.95)';
-        ctx.beginPath(); ctx.arc(sx, sy, 4, 0, 7); ctx.fill();
-        // throttle column to the left
-        const tx = cx - R - 14, th = R * 2;
-        ctx.strokeStyle = 'rgba(120,150,180,.30)';
-        ctx.strokeRect(tx - 5, cy - R, 10, th);
-        const tfill = clamp(p.throttle, 0, 1) * th;
-        ctx.fillStyle = p.boost ? 'rgba(255,154,61,.95)' : 'rgba(57,208,255,.85)';
-        ctx.fillRect(tx - 5, cy + R - tfill, 10, tfill);
-        ctx.restore();
       }
 
-      // off-screen / on-screen enemy markers (small boxes)
+      // restrained target brackets with identity + range. These read like a
+      // finished combat HUD while keeping the aircraft itself visible.
       ctx.save();
-      ctx.lineWidth = 1.2;
+      ctx.lineWidth = 1.35;
+      ctx.font = '600 10px monospace'; ctx.textAlign = 'center';
       for (const o of this.craft){
         if (!o.alive || o.team === p.team) continue;
+        if (this.lockState && this.lockState.target && this.lockState.target._src === o) continue;
         const sc = this.project(o.pos);
         if (sc && sc.front){
-          ctx.strokeStyle = 'rgba(255,77,109,.7)';
-          ctx.strokeRect(sc.x - 10, sc.y - 10, 20, 20);
+          const dist = Math.hypot(o.pos.x - p.pos.x, o.pos.y - p.pos.y, o.pos.z - p.pos.z);
+          const r = 8 + clamp(1300 / Math.max(300, dist), 0, 4), k = 5;
+          ctx.strokeStyle = 'rgba(255,92,119,.82)';
+          ctx.beginPath();
+          ctx.moveTo(sc.x-r,sc.y-r+k);ctx.lineTo(sc.x-r,sc.y-r);ctx.lineTo(sc.x-r+k,sc.y-r);
+          ctx.moveTo(sc.x+r-k,sc.y-r);ctx.lineTo(sc.x+r,sc.y-r);ctx.lineTo(sc.x+r,sc.y-r+k);
+          ctx.moveTo(sc.x+r,sc.y+r-k);ctx.lineTo(sc.x+r,sc.y+r);ctx.lineTo(sc.x+r-k,sc.y+r);
+          ctx.moveTo(sc.x-r+k,sc.y+r);ctx.lineTo(sc.x-r,sc.y+r);ctx.lineTo(sc.x-r,sc.y+r-k);
+          ctx.stroke();
+          ctx.fillStyle = 'rgba(255,163,179,.92)';
+          ctx.fillText(String(o.name || 'HOSTILE').toUpperCase(), sc.x, sc.y - r - 9);
+          ctx.fillStyle = 'rgba(224,235,244,.78)';
+          ctx.fillText(Math.round(dist) + ' m', sc.x, sc.y + r + 13);
         }
       }
       ctx.restore();
     }
+
+    this.flightDeck?.draw(p, this.time);
+    // Reticles stay frame-synchronous; telemetry and radar need only 10 Hz.
+    if (this._hudNext > this.time && !this.over) return;
+    this._hudNext = this.time + 0.1;
 
     // ---- DOM bars ----
     if (p){
@@ -3454,17 +3623,7 @@ class Sim {
       const heat = clamp((p.temp - AMBIENT_TEMP) / (p.stats.overheat - AMBIENT_TEMP), 0, 1);
       this.dom.heat.style.width = (heat * 100) + '%';
       this.dom.heatv.textContent = Math.round(p.temp) + '°C';
-      // weapon + ammo
-      const w = p.weapons[p.curWeapon];
-      if (w){
-        const ammoTxt = w.reloading > 0 ? 'RELOAD…' : (w.ammo + (w.reserve ? '+' + w.reserve : ''));
-        const count = weaponMembers(w).length;
-        this.dom.weapon.textContent = `▸ ${w.name}${count > 1 ? ' ×' + count : ''}  [${ammoTxt}${count > 1 ? ' each' : ''}]  (${p.curWeapon + 1}/${p.weapons.length})  ✦${p.flares}`;
-      } else this.dom.weapon.textContent = (p.turrets && p.turrets.length) ? 'AUTO BATTERY' : 'NO WEAPONS';
-      if (p.turrets && p.turrets.length){
-        const tracking = p.turrets.filter(t => t.target && t.target.alive).length;
-        this.dom.weapon.textContent += `  ·  AUTO ${tracking}/${p.turrets.length}`;
-      }
+      this.flightDeck.update(p, this.director, this.guideOpen);
       // speed / alt / throttle
       const kmh = Math.round(p.speed * 3.6);
       const alt = Math.round(p.pos.y - this.groundY);
@@ -3562,11 +3721,14 @@ class Sim {
   //  TEARDOWN
   // ---------------------------------------------------------------------
   teardown(){
+    this.finishGameplay();
     if (this.unsubFrame) this.unsubFrame();
     this.unbindInput();
     clearTimeout(this._msgT);
     clearTimeout(this._hitMarkerT);
     clearTimeout(this._helpT1); clearTimeout(this._helpT2);   // don't leak the controls-legend timers on fast restart
+    if (this._guideEl){ this._guideEl.remove(); this._guideEl = null; }
+    this._tutorialHint?.remove(); this._tutorialHint = null; this.flightDeck = null;
     // dispose scene contents (but keep the cross-battle shared geometry cache)
     const shared = new Set([Sim.bulletGeom, Sim.trailGeom, Sim.missileGeom, Sim.missileNoseGeom, Sim.missileFinGeom, Sim.flameGeom, Sim.bombGeom, Sim.bombNoseGeom, Sim.bombFinGeom, Sim.boomGeom, Sim.flareGeom2, Sim.torpedoGeom, Sim.torpedoNoseGeom, Sim.wakeGeom].filter(Boolean));
     if (this.scene){
@@ -3576,7 +3738,7 @@ class Sim {
           const mats = Array.isArray(o.material) ? o.material : [o.material];
           // material.dispose() does NOT free the material's textures — dispose those too,
           // or every battle leaks them (the sky/HUD/any mapped material).
-          mats.forEach(m => { if (!m) return; for (const k in m){ const v = m[k]; if (v && v.isTexture) v.dispose(); } m.dispose && m.dispose(); });
+          mats.forEach(m => { if (!m) return; for (const k in m){ const v = m[k]; if (v && v.isTexture && !v.userData?.aosSharedSurface) v.dispose(); } m.dispose && m.dispose(); });
         }
         // a DirectionalLight's 2048² shadow map is a GPU render target the scene drop never
         // frees — dispose it or every battle leaks a ~16 MB depth texture (the #1 leak).

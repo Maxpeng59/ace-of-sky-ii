@@ -25,7 +25,7 @@ function planDesigns(value=plan){
 }
 
 export const MissionPlanner={
-  show(){root=$('screen-mission-planner');if(!root)return;hideOthers();show(root);syncSelection();render();if(keyHandler)removeEventListener('keydown',keyHandler);keyHandler=e=>{if(e.key==='Escape')back();};addEventListener('keydown',keyHandler);},
+  show(){root=$('screen-mission-planner');if(!root)return;hideOthers();show(root);syncSelection();render();if(keyHandler)removeEventListener('keydown',keyHandler);keyHandler=()=>{};addEventListener('keydown',keyHandler);},
   close(){if(keyHandler){removeEventListener('keydown',keyHandler);keyHandler=null;}if(root){hide(root);clear(root);}},
 };
 

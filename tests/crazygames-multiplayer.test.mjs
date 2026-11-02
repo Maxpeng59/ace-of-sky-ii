@@ -54,10 +54,12 @@ assert.equal(await bridge.crazyGamesInviteLink('ABC234', 'squad3'),
   'https://www.crazygames.com/game/ace-of-sky-ii?room=ABC234');
 
 bridge.crazyGamesGameplayStart();
+bridge.crazyGamesGameplayStart();
+bridge.crazyGamesGameplayStop();
 bridge.crazyGamesGameplayStop();
 bridge.leaveCrazyGamesRoom();
-assert.ok(calls.some(([name]) => name === 'gameplayStart'));
-assert.ok(calls.some(([name]) => name === 'gameplayStop'));
+assert.equal(calls.filter(([name]) => name === 'gameplayStart').length, 1);
+assert.equal(calls.filter(([name]) => name === 'gameplayStop').length, 1);
 assert.ok(calls.some(([name]) => name === 'leftRoom'));
 
 // The same published bundle must not wait on the SDK parent handshake when it
@@ -74,11 +76,16 @@ assert.deepEqual(offPortalLaunch.inviteParams, { room: 'JKL567', mode: 'duel' })
 const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const mainSource = fs.readFileSync(new URL('../js/main.js', import.meta.url), 'utf8');
 const pvpSource = fs.readFileSync(new URL('../js/pvp.js', import.meta.url), 'utf8');
+const battleSource = fs.readFileSync(new URL('../js/battle.js', import.meta.url), 'utf8');
 assert.match(html, /https:\/\/sdk\.crazygames\.com\/crazygames-sdk-v3\.js/);
 assert.match(mainSource, /launch\.instant/);
 assert.match(mainSource, /Pvp\.openFromPlatform/);
 assert.match(pvpSource, /COPY INVITE LINK/);
 assert.match(pvpSource, /updateCrazyGamesRoom\(session\.room, session\.mode, true\)/);
 assert.match(pvpSource, /same party and transport together for a rematch/);
+assert.match(battleSource, /if \(!this\.guideOpen\) this\.beginGameplay\(\)/);
+assert.match(battleSource, /resumeFromLesson\(\)[\s\S]*?this\.beginGameplay\(\)/);
+assert.match(battleSource, /pauseWeaponLesson\(\)[\s\S]*?this\.finishGameplay\(\)/);
+assert.match(battleSource, /this\.finishGameplay\(\)/);
 
 console.log('CrazyGames multiplayer compliance tests passed');

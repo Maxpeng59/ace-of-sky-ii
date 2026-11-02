@@ -13,7 +13,7 @@
 import * as THREE from 'three';
 import { clamp, el, clear, $, fmtCr, fmtMass, fmtNum, fmtTime, sfx, toast } from './util.js';
 import { computeStats, effSize, partCenter, navalCruise, OVERHEAT_TEMP, AMBIENT_TEMP } from './physics.js';
-import { PARTS, WEAPONS, CATEGORIES, partsByCategory, CAT_COLORS } from './parts.js';
+import { PARTS, WEAPONS, CATEGORIES, partsByCategory, CAT_COLORS, AIRFRAME_FINISHES, applyAirframeFinish, normalizeAirframeFinish } from './parts.js';
 import * as core from './core.js';
 import * as engine from './engine.js';
 
@@ -115,6 +115,7 @@ export const Hangar = {
   close(){
     if (!S) return;
     S.destroyed = true;
+    resetThumbQueue();
     removeInput();
     if (S.unsub) try { S.unsub(); } catch (e){}
     engine.resetView();
@@ -133,7 +134,7 @@ export const Hangar = {
           // material.dispose() leaves its textures alive — the 2048² concrete-apron
           // CanvasTexture would leak on every open/close without freeing .map et al.
           const mats = Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []);
-          mats.forEach(m => { if (!m) return; for (const k in m){ const v = m[k]; if (v && v.isTexture) v.dispose(); } m.dispose?.(); });
+          mats.forEach(m => { if (!m) return; for (const k in m){ const v = m[k]; if (v && v.isTexture && !v.userData?.aosSharedSurface) v.dispose(); } m.dispose?.(); });
         }
         if (o.isLight && o.shadow && o.shadow.map){ o.shadow.map.dispose(); }
       });
@@ -274,27 +275,50 @@ function buildDOM(){
 //  and rendered lazily as items scroll into view.
 // ---------------------------------------------------------------------------
 const THUMB_CACHE = new Map();
-let _thScene = null, _thCam = null, _thRT = null, _th2d = null, _thQueue = [], _thRunning = false;
+let _thScene = null, _thCam = null, _thRT = null, _th2d = null, _thQueue = [];
+let _thObserver = null, _thTimer = null;
+const THUMB_SIZE = 96, _thPixels = new Uint8Array(THUMB_SIZE * THUMB_SIZE * 4);
+let _thImage = null;
 
-// queue swatches and render their thumbnails in small setTimeout batches (so it
-// never blocks the UI, and unlike rAF/IntersectionObserver it also runs offscreen).
-function queueThumbs(swatches){
-  for (const sw of swatches) _thQueue.push(sw);
-  if (_thRunning) return;
-  _thRunning = true;
-  const step = () => {
-    if (!S || S.destroyed){ _thRunning = false; _thQueue.length = 0; return; }
-    let n = 0;
-    while (n < 6 && _thQueue.length){
-      const sw = _thQueue.shift();
-      if (!sw.isConnected) continue;
-      const url = renderPartThumb(PARTS[sw.dataset.thumbKey]);
-      if (url){ sw.style.backgroundImage = 'url(' + url + ')'; sw.style.backgroundSize = 'cover'; sw.style.backgroundPosition = 'center'; }
-      n++;
-    }
-    if (_thQueue.length) setTimeout(step, 0); else _thRunning = false;
+function resetThumbQueue(){
+  _thObserver?.disconnect(); _thObserver = null;
+  clearTimeout(_thTimer); _thTimer = null; _thQueue.length = 0;
+}
+
+function drawQueuedThumbs(){
+  _thTimer = null;
+  if (!S || S.destroyed) return;
+  for (let n = 0; n < 2 && _thQueue.length; n++){
+    const sw = _thQueue.shift();
+    if (!sw.isConnected) continue;
+    const url = renderPartThumb(PARTS[sw.dataset.thumbKey]);
+    if (url) sw.style.backgroundImage = `url(${url})`;
+  }
+  if (_thQueue.length) _thTimer = setTimeout(drawQueuedThumbs, 16);
+}
+
+// Only render visible/near-visible items, not all 400 parts on every editor open.
+function queueThumbs(swatches, palette){
+  resetThumbQueue();
+  const enqueue = sw => {
+    _thQueue.push(sw);
+    if (_thTimer === null) _thTimer = setTimeout(drawQueuedThumbs, 16);
   };
-  setTimeout(step, 0);
+  if (typeof IntersectionObserver !== 'undefined'){
+    const observer = new IntersectionObserver(entries => {
+      if (_thObserver !== observer) return;
+      for (const entry of entries) if (entry.isIntersecting){
+        observer.unobserve(entry.target); enqueue(entry.target);
+      }
+    }, { root: palette, rootMargin: '96px' });
+    _thObserver = observer;
+  }
+  for (const sw of swatches){
+    const url = THUMB_CACHE.get(sw.dataset.thumbKey);
+    if (url) sw.style.backgroundImage = `url(${url})`;
+    else if (_thObserver) _thObserver.observe(sw);
+    else enqueue(sw);
+  }
 }
 
 function disposeThumbMesh(m){ m.traverse(o => { if (o.isMesh){ o.geometry?.dispose?.(); if (Array.isArray(o.material)) o.material.forEach(x => x.dispose?.()); else o.material?.dispose?.(); } }); }
@@ -311,7 +335,7 @@ function renderPartThumb(def){
     const k = new THREE.DirectionalLight(0xffffff, 1.45); k.position.set(4, 6, 5); _thScene.add(k);
     const f = new THREE.DirectionalLight(0xacc4e6, 0.55); f.position.set(-5, 2, -4); _thScene.add(f);
     _thCam = new THREE.PerspectiveCamera(32, 1, 0.05, 400);
-    _thRT = new THREE.WebGLRenderTarget(128, 128, { samples: 4 });
+    _thRT = new THREE.WebGLRenderTarget(THUMB_SIZE, THUMB_SIZE, { samples: 4 });
   }
   let mesh; try { mesh = def.build(THREE, def); } catch (e){ return null; }
   _thScene.add(mesh);
@@ -326,13 +350,13 @@ function renderPartThumb(def){
   renderer.setRenderTarget(_thRT);
   renderer.setClearColor(0xf4f6f9, 1);
   renderer.render(_thScene, _thCam);
-  const W = 128, H = 128, buf = new Uint8Array(W * H * 4);
+  const W = THUMB_SIZE, H = THUMB_SIZE, buf = _thPixels;
   renderer.readRenderTargetPixels(_thRT, 0, 0, W, H, buf);
   renderer.setRenderTarget(prevTarget); renderer.setClearColor(prevClear, prevAlpha);
   _thScene.remove(mesh); disposeThumbMesh(mesh);
   if (!_th2d){ _th2d = document.createElement('canvas'); _th2d.width = W; _th2d.height = H; }
-  const ctx = _th2d.getContext('2d'), imgD = ctx.createImageData(W, H);
-  for (let y = 0; y < H; y++){ const sy = H - 1 - y; for (let x = 0; x < W; x++){ const di = (y * W + x) * 4, si = (sy * W + x) * 4; imgD.data[di] = buf[si]; imgD.data[di + 1] = buf[si + 1]; imgD.data[di + 2] = buf[si + 2]; imgD.data[di + 3] = buf[si + 3]; } }
+  const ctx = _th2d.getContext('2d'), imgD = _thImage ||= ctx.createImageData(W, H);
+  for (let y = 0; y < H; y++) imgD.data.set(buf.subarray((H - 1 - y) * W * 4, (H - y) * W * 4), y * W * 4);
   ctx.putImageData(imgD, 0, 0);
   const url = _th2d.toDataURL('image/png');
   THUMB_CACHE.set(def.key, url);
@@ -376,7 +400,7 @@ function buildPalette(palette){
       palette.appendChild(item);
     }
   }
-  queueThumbs(swatches);
+  queueThumbs(swatches, palette);
 }
 
 function metaLine(def){
@@ -419,6 +443,20 @@ function buildInfo(info){
   roleLbl.appendChild(roleSel);
   rowCC.appendChild(roleLbl);
   info.appendChild(rowCC);
+
+  const finishLbl = el('label', 'field', 'Airframe surface');
+  finishLbl.style.marginTop = '8px';
+  const finishSel = el('select');
+  const currentFinish = normalizeAirframeFinish(S.design.finish);
+  for (const finish of AIRFRAME_FINISHES){
+    const option = el('option', '', finish.label);
+    option.value = finish.key;
+    option.selected = finish.key === currentFinish;
+    finishSel.appendChild(option);
+  }
+  finishSel.onchange = () => { S.design.finish = finishSel.value; applyLivery(); emitChange(); };
+  finishLbl.appendChild(finishSel);
+  info.appendChild(finishLbl);
 
   // selected-part inspector
   const sel = el('div', 'panel tight'); sel.style.marginTop = '12px';
@@ -997,7 +1035,7 @@ function addPartMesh(p, idx){
 // recolour structural/wing/armor parts toward the design livery so the craft
 // reads as a single aircraft; keep functional colours (engines, guns, glow).
 function applyLivery(){
-  const col = new THREE.Color(normHex(S.design.color));
+  const col = normHex(S.design.color);
   S.partMeshes.forEach((g, i) => {
     if (!g) return;
     const def = PARTS[S.design.parts[i].key];
@@ -1006,9 +1044,8 @@ function applyLivery(){
     // weapons, power) and glow/transparent bits as-is.
     const noLivery = (cat === 'engine' || cat === 'thruster' || cat === 'gun' || cat === 'missile' || cat === 'bomb' || cat === 'power');
     g.traverse(o => {
-      if (o.isMesh && !o.userData.glow && !noLivery && !o.material.transparent){
-        o.material.color.copy(col);
-      }
+      if (o.isMesh && !o.userData.glow && !noLivery && !o.material.transparent)
+        applyAirframeFinish(THREE, o.material, S.design.finish, col);
     });
   });
 }
@@ -1238,6 +1275,7 @@ function doImport(){
       S.design.parts = d.parts;
       S.design.name = d.name || S.design.name;
       S.design.color = d.color || S.design.color;
+      S.design.finish = normalizeAirframeFinish(d.finish);
       S.design.role = d.role || S.design.role;
       S.selected = null; S.pendingKey = null;
       rebuildAircraft();
@@ -1291,10 +1329,8 @@ function showModal(title, fill){
   host.appendChild(bg);
   const closeFn = () => { bg.remove(); };
   bg.onclick = (e) => { if (e.target === bg) closeFn(); };
-  // Esc closes; scoped listener removed on close
-  const onKey = (e) => { if (e.key === 'Escape'){ closeFn(); removeEventListener('keydown', onKey, true); } };
-  addEventListener('keydown', onKey, true);
-  fill(body, () => { closeFn(); removeEventListener('keydown', onKey, true); });
+  // Keep this modal button-driven: Escape is reserved by browsers for leaving fullscreen.
+  fill(body, closeFn);
   return closeFn;
 }
 
@@ -1491,7 +1527,7 @@ function onKeyDown(e){
   // don't hijack typing in inputs/textarea
   const t = e.target;
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return;
-  // modal open? let Escape pass to its own handler.
+  // A modal owns its explicit buttons while open.
   if ($('modal-root') && $('modal-root').querySelector('.modal-bg')) return;
   if (document.querySelector('.modal-bg')) return;
 
@@ -1501,7 +1537,6 @@ function onKeyDown(e){
   else if (k === 'y'){ e.preventDefault(); rotateActive('z'); }
   else if (k === 'c'){ e.preventDefault(); combineSelectedWeapon(); }
   else if (k === 'delete' || k === 'backspace'){ e.preventDefault(); deleteSelected(); }
-  else if (k === 'escape'){ if (S.pendingKey){ S.pendingKey = null; rebuildGhost(); highlightPalette(); renderSelInspector(); } else if (S.selected != null){ S.selected = null; highlightSelected(); renderSelInspector(); } }
   else if (k === 'z' && (e.ctrlKey || e.metaKey)){ e.preventDefault(); undo(); }
   else if (k === 'f'){ e.preventDefault(); frameCamera(); }
   else if (k === 'g'){ e.preventDefault(); S.showGizmo = !S.showGizmo; updateGizmo(); }

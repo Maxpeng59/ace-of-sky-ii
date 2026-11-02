@@ -146,7 +146,10 @@ export function computeStats(design){
   // dogfight-grade while still differentiated by design: a ~2t fighter pitches
   // ~65°/s and rolls ~100°/s; a 6t heavy bomber is much more sluggish but flyable.
   const lenSpan = Math.max(2, Math.max(bx, bz));
-  const inertiaN = (mass / 1300) * (0.55 + lenSpan / 9) + 0.05;   // ≈1.9 for the Falcon
+  // Mass feeds inertia on a SOFTENED slope (larger divisor + a constant floor):
+  // a light airframe is unchanged, but hanging a full weapons load on a craft no
+  // longer craters its turn rate the way a straight m·L² term did.
+  const inertiaN = (mass / 1750) * (0.55 + lenSpan / 9) + 0.26;
   // per-axis control authority: surfaces + RCS/vectoring (via ctrl*), plus a
   // thrust bonus on pitch/yaw (powerful engines & TVC help point the nose).
   const pitchAuth = ctrlPitch * 7.5 + thrust * 0.0012 + 6;

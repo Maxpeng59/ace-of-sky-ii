@@ -22,14 +22,14 @@
 // ============================================================================
 import { $, el, clear, show, hide, toast, sfx, fmtCr, fmtTime, clamp } from './util.js';
 import { State, newDesign, cloneDesign, exportCode, importCode, statsOf, save } from './core.js';
-import { connect, createRoom, joinRoom, checkHealth, OFFICIAL_RELAY_URL } from './net.js?v=20261030-10p';
+import { connect, createRoom, joinRoom, checkHealth, OFFICIAL_RELAY_URL } from './net.js';
 import { Hangar } from './hangar.js';
-import { Battle } from './battle.js?v=20261030-10p';
+import { Battle } from './battle.js';
 import { Menu } from './menu.js';
 import {
-  crazyGamesGameplayStart, crazyGamesGameplayStop, crazyGamesInviteLink, crazyGamesUsername,
+  crazyGamesInviteLink, crazyGamesUsername,
   leaveCrazyGamesRoom, updateCrazyGamesRoom,
-} from './crazygames.js?v=20261030-cgmp';
+} from './crazygames.js';
 
 const ROOT_ID = 'screen-pvp';
 const SCREEN_IDS = ['screen-menu', 'screen-creative', 'screen-mission-planner', 'screen-campaign', 'screen-pvp', 'screen-hangar'];
@@ -128,7 +128,6 @@ function cleanupSession(){
   stopDesignTimer();
   if (net){ try { net.close(); } catch (e){} net = null; }
   leaveCrazyGamesRoom();
-  crazyGamesGameplayStop();
   for (const fn of teardownFns){ try { fn(); } catch (e){} }
   teardownFns = [];
   battleSubs.clear();
@@ -985,7 +984,6 @@ function startMatch(snapshot = null){
   matchStarting = false;
   session.phase = 'match';
   updateCrazyGamesRoom(session.room, session.mode, false);
-  crazyGamesGameplayStart();
 
   const list = Array.isArray(snapshot) ? snapshot : session.peers.map(id => ({ id, ...(session.players[id] || {}) }));
   const myTeam = playerTeam(session.playerId);
@@ -1037,7 +1035,6 @@ function startMatch(snapshot = null){
 function onMatchEnd(result){
   // Keep the same party and transport together for a rematch. CrazyGames
   // requires groups to remain together after a round-based match.
-  crazyGamesGameplayStop();
   if (!session){ Menu.show(); return; }
   session.connected = !!net; session.myReady = false;
   for (const p of Object.values(session.players)) p.ready = false;

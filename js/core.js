@@ -19,9 +19,9 @@ export const bus = {
 export function uid(){ return 'd' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36); }
 
 // ---- design model ----------------------------------------------------------
-//  AircraftDesign = { id, name, author, role, parts:[ {key,gx,gy,gz,rot} ], color }
+//  AircraftDesign = { id, name, author, role, parts:[ {key,gx,gy,gz,rot} ], color, finish }
 export function newDesign(name = 'New Aircraft'){
-  return { id: uid(), name, author: 'You', role: 'fighter', color: '#cfd8e3', parts: [] };
+  return { id: uid(), name, author: 'You', role: 'fighter', color: '#cfd8e3', finish: 'operational', parts: [] };
 }
 export function cloneDesign(d, suffix = ' Copy'){
   return { ...JSON.parse(JSON.stringify(d)), id: uid(), name: (d.name || 'Aircraft') + suffix };
@@ -32,7 +32,7 @@ export function statsOf(d){ return computeStats(d); }
 export function exportCode(d){
   // [key, gx, gy, gz, rot(yaw), rx(pitch), rz(roll), hy, hp, hr, fireGroup].
   // Later fields are optional, so every older design code remains compatible.
-  const lean = { n: d.name, a: d.author, r: d.role, c: d.color, p: d.parts.map(p => [p.key, p.gx, p.gy, p.gz, p.rot || 0, p.rx || 0, p.rz || 0, p.hy || 0, p.hp || 0, p.hr || 0, p.fireGroup || '']) };
+  const lean = { n: d.name, a: d.author, r: d.role, c: d.color, f: d.finish || 'operational', p: d.parts.map(p => [p.key, p.gx, p.gy, p.gz, p.rot || 0, p.rx || 0, p.rz || 0, p.hy || 0, p.hp || 0, p.hr || 0, p.fireGroup || '']) };
   try { return 'ASK2.' + btoa(unescape(encodeURIComponent(JSON.stringify(lean)))); }
   catch (e){ return 'ASK2.' + btoa(JSON.stringify(lean)); }
 }
@@ -44,7 +44,7 @@ export function importCode(str){
     const json = decodeURIComponent(escape(atob(str.slice(5))));
     const lean = JSON.parse(json);
     return {
-      id: uid(), name: lean.n || 'Imported', author: lean.a || 'Unknown', role: lean.r || 'fighter', color: lean.c || '#cfd8e3',
+      id: uid(), name: lean.n || 'Imported', author: lean.a || 'Unknown', role: lean.r || 'fighter', color: lean.c || '#cfd8e3', finish: lean.f || 'operational',
       parts: (lean.p || []).map(a => ({ key: a[0], gx: a[1], gy: a[2], gz: a[3], rot: a[4] || 0, rx: a[5] || 0, rz: a[6] || 0, hy: a[7] || 0, hp: a[8] || 0, hr: a[9] || 0, ...(a[10] ? { fireGroup: a[10] } : {}) })),
     };
   } catch (e){ console.warn('bad design code', e); return null; }
@@ -168,7 +168,7 @@ const CODE_FALCON16 = 'ASK2.eyJuIjoiTmV3IEFpcmNyYWZ0IiwiYSI6IllvdSIsInIiOiJmaWdo
 const CODE_CARRIER = 'ASK2.eyJuIjoiTmV3IEFpcmNyYWZ0IiwiYSI6IllvdSIsInIiOiJmaWdodGVyIiwiYyI6IiNjOWQzZGUiLCJwIjpbWyJmdWVsX2ZsYXRfbTIiLC0xLDAsLTMsMCwwLDBdLFsiZnVlbF9mbGF0X20yIiwtMSwwLC0xLDAsMCwwXSxbImZ1ZWxfZmxhdF9tMiIsLTEsMCwxLDAsMCwwXSxbImZ1ZWxfZmxhdF9tMiIsLTEsMCwzLDAsMCwwXSxbImZ1ZWxfZmxhdF9tMiIsLTMsMCwtMywwLDAsMF0sWyJmdWVsX2ZsYXRfbTIiLC0zLDAsLTEsMCwwLDBdLFsiZnVlbF9mbGF0X20yIiwtMywwLDEsMCwwLDBdLFsiZnVlbF9mbGF0X20yIiwtMywwLDMsMCwwLDBdLFsiZnVlbF9mbGF0X20yIiwtMywwLC01LDAsMCwwXSxbImZ1ZWxfZmxhdF9tMiIsLTEsMCwtNSwwLDAsMF0sWyJmdWVsX2ZsYXRfbDEiLC0yLDAsNSwwLDAsMF0sWyJmdWVsX2ZsYXRfbTIiLC0xLDAsNywwLDAsMF0sWyJmdWVsX2ZsYXRfbTIiLC0xLDAsOSwwLDAsMF0sWyJmdWVsX2ZsYXRfczIiLDAsMCwxMSwwLDAsMF0sWyJmdWVsX2ZsYXRfczIiLDAsMSwtNSwwLDAsMF0sWyJmdWVsX2ZsYXRfczIiLDAsMSwtMywwLDAsMF0sWyJmdWVsX2ZsYXRfczIiLDAsMSwtMSwwLDAsMF0sWyJmdWVsX2ZsYXRfczEiLC0xLDEsLTUsMCwwLDBdLFsiZnVlbF9mbGF0X3MxIiwtMSwxLC00LDAsMCwwXSxbImZ1ZWxfZmxhdF9zMSIsLTEsMSwtMywwLDAsMF0sWyJmdWVsX2ZsYXRfczEiLDAsMiwtNSwwLDAsMF0sWyJjbWRhcm13cG5fY21kX3Byb2JlX2E3IiwwLDIsLTMsMCwwLDBdLFsiZW5naW5lX2pldF9zdXBlciIsMSwwLC01LDAsMCwwXSxbImVuZ2luZV9qZXRfc3VwZXIiLC00LDAsLTUsMCwwLDBdLFsiZW5naW5lX2Zhbl9nZWFyZWQiLDEsMCwtMywwLDAsMF0sWyJlbmdpbmVfZmFuX2dlYXJlZCIsLTQsMCwtMywwLDAsMF0sWyJ3aW5nbGV0IiwwLDMsLTUsMCwwLDBdLFsid2luZ19kZWx0YSIsMCwwLC0yLDAsMCwwXSxbIndpbmdfZGVsdGEiLC02LDAsLTIsMCwwLDBdLFsicmFkaWF0b3IiLC0xLDIsLTUsMSwwLDBdLFsic2Vuc29yX3JhZGFyIiwwLDMsLTQsMCwxLDBdLFsiY21kYXJtd3BuX2FybV9iZWxseV9iMTAiLC0xLDEsLTEsMCwwLDBdLFsiZ3VuX2ZsYWsiLDAsMiwtMSwwLDAsMF0sWyJndW5fZmxhayIsLTEsMiwtMSwwLDAsMF0sWyJjbWRhcm13cG5fZ3VuX3R1cnJldF9jOCIsLTQsMSwtNCwxLDEsMF0sWyJjbWRhcm13cG5fZ3VuX3R1cnJldF9jOCIsLTQsMSwtMiwxLDEsMF0sWyJjbWRhcm13cG5fZ3VuX3R1cnJldF9jOCIsMCwyLC0yLDEsMSwwXSxbImNtZGFybXdwbl9ndW5fdHVycmV0X2Nhbm5vbl9jOSIsLTEsMCwyLDAsMCwwXSxbImNtZGFybXdwbl9ndW5fdHVycmV0X2Nhbm5vbl9jOSIsLTEsMCw0LDAsMCwwXSxbImNtZGFybXdwbl9ndW5fdHVycmV0X2Nhbm5vbl9jOSIsLTIsMSwtMywwLDAsMF0sWyJrc3BfZWxldm9uXzEiLC0xLDIsLTUsMiwwLDBdLFsia3NwX2VsZXZvbl8xIiwtMSwxLC01LDIsMCwwXV19';
 function fromCode(id, name, role, code){
   const d = importCode(code) || { parts: [] };
-  return { id, name, author: 'Factory', role, color: d.color || '#cfd8e3', parts: d.parts || [] };
+  return { id, name, author: 'Factory', role, color: d.color || '#cfd8e3', finish: d.finish || 'operational', parts: d.parts || [] };
 }
 
 export const STOCK_DESIGNS = [

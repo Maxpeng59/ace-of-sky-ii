@@ -20,6 +20,10 @@
 - **Ship role** — uses **A / D** as a naval helm and **W / S** for flank/slow speed. Ships stay level on the surface, follow the swell, and never bank, pitch, or fly like aircraft.
 - Automatic turrets use role-based effective ranges and reduced fire-control damage: CIWS/MG/flak defend against aircraft, while heavy naval batteries target surface ships instead of unrealistically tracking fighters.
 - **V** — toggle the top-down bombardment view and bomb impact/blast prediction
+- **1 / 2 / 3** — free flight / hold current heading and pitch / level flight.
+- **4 / 5 / 6** — one left roll / one right roll / a 180° break turn, followed by level-flight recovery. Fixed-wing aircraft only; manual mouse steering or A/D cancels an assist or maneuver. Commands use the aircraft's own handling limits, not instant rotations.
+- The bottom-center navball shows actual heading, pitch and bank (blue sky, amber ground); its green marker shows the velocity direction. The adjacent weapon schematic shows the selected weapon, ready ammunition, reserve and reload state. Combined weapons show **total** ammunition across the group.
+- Quick Flight starts immediately. After seven seconds of flying, the simulation pauses for a hands-on **Tab** weapon-switch lesson, then resumes on command. **Skip tutorial** is always available; online matches are never paused by onboarding.
 - In the hangar: **click** to place a part, **Shift+drag** to turn the view, **wheel** to zoom, **R / T / Y** to rotate a part.
 - In the hangar: select a non-missile weapon and press **C** to combine every identical unpaired weapon into one simultaneous-fire group. Groups can contain any number of weapons and appear in flight as `Weapon ×N`; press **C** again to separate the group.
 - The Hangar Library supports persistent folders and plane search. New or imported planes go into the open folder; deleting a folder keeps every aircraft and moves it to **Unfiled**.
@@ -52,7 +56,22 @@ Open **Advanced: use a custom development relay** in PvP and enter `http://local
 
 ## Tech
 
-- Vanilla ES modules, no bundler. `index.html` loads `js/main.js`; an import map points `three` at `vendor/three.module.js`.
+### Lightweight project and release builds
+
+Editable source still runs with `python3 serve.py 8126`; no npm install is required.
+Run `node --test tests/*.test.mjs` for regression checks. To generate a smaller
+CrazyGames upload, run `node scripts/build-release.mjs`. It bundles/minifies the
+game and styles, removes unused library code, and writes a ZIP in `releases/`.
+The pinned build tool uses npm's external cache (or `ESBUILD_BIN`); it does not
+install a dependency tree inside this folder. Existing ZIPs are never overwritten.
+
+Generated releases and portal media are kept outside the GitHub source tree.
+The relay source and lockfile remain in `multiplayer-relay/`; install its
+dependencies separately when doing relay development. Size checks should
+include hidden files: `node scripts/check-size.mjs` checks both file bytes and
+allocated disk space against a strict decimal 50 MB limit.
+
+- Vanilla ES modules for development; optional minified release bundle. `index.html` loads `js/main.js`; an import map points `three` at `vendor/three.module.js`.
 - Rendering: Three.js (WebGL). Physics, AI, and all gameplay are hand-rolled in `js/`.
 - The official relay is a Sites full-stack app backed by D1; `server/relay.py` remains a dependency-free local reference implementation.
 

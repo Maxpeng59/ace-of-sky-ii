@@ -22,8 +22,9 @@ import { Music } from './music.js';
 import { Creative } from './creative.js';
 import { MissionPlanner } from './mission-planner.js';
 import { Campaign } from './campaign.js';
-import { Pvp } from './pvp.js?v=20261030-10p';
+import { Pvp } from './pvp.js';
 import { Hangar } from './hangar.js';
+import { Battle } from './battle.js';
 
 // ---------------------------------------------------------------------------
 //  Screen plumbing
@@ -568,6 +569,65 @@ function buildLibrarySection(){
 // ---------------------------------------------------------------------------
 //  Mode buttons (the three big entries)
 // ---------------------------------------------------------------------------
+function launchQuickFlight(){
+  const stock = core.stockGet('stock_falcon') || STOCK_DESIGNS[0];
+  if (!stock){ toast('Quick Flight is unavailable.', 'bad'); return; }
+  const player = core.cloneDesign(stock, '');
+  player.author = 'You';
+  const enemy = core.cloneDesign(stock, '');
+  enemy.author = 'Rival Squadron';
+  exitMenu();
+  hideAllScreens();
+  try {
+    Battle.start({
+      player,
+      allies: [],
+      enemies: [{ design: enemy, count: 2, skill: 0.28 }],
+      env: 'day',
+      objective: { type: 'deathmatch', label: 'Shoot down both enemy fighters' },
+      startAirborne: true,
+      showGuide: true,
+      net: null,
+      onEnd: () => Menu.show(),
+    });
+  } catch (err){
+    console.error('Quick Flight failed', err);
+    toast('Could not launch Quick Flight.', 'bad');
+    Menu.show();
+  }
+}
+
+function showFlightControls(){
+  modal((box, close) => {
+    box.classList.add('flight-controls-modal');
+    box.appendChild(el('div', 'eyebrow', 'Flight controls'));
+    box.appendChild(el('h2', '', 'Fly, aim, fire'));
+    const grid = el('div', 'flight-guide-grid');
+    const item = (keys, title, detail) => {
+      const card = el('div', 'flight-guide-item');
+      const keyRow = el('div', 'flight-guide-keys');
+      for (const key of keys) keyRow.appendChild(el('span', 'kbd', key));
+      card.appendChild(keyRow);
+      card.appendChild(el('b', '', title));
+      card.appendChild(el('small', '', detail));
+      grid.appendChild(card);
+    };
+    item(['MOUSE'], 'Aim & turn', 'The aircraft follows the reticle.');
+    item(['CLICK', 'SPACE'], 'Fire', 'Use the selected weapon.');
+    item(['SHIFT'], 'Boost', 'Burn fuel for a burst of speed.');
+    item(['W', '↑', 'S', '↓'], 'Throttle', 'Full power or brake.');
+    item(['A', 'D', '←', '→'], 'Roll', 'Arrow keys work on any layout.');
+    item(['TAB'], 'Weapon', 'Cycle the active weapon.');
+    box.appendChild(grid);
+    const goal = el('div', 'flight-guide-goal');
+    goal.innerHTML = '<span>GOAL</span><b>Follow the red marker and destroy every enemy.</b>';
+    box.appendChild(goal);
+    const row = el('div', 'row'); row.style.justifyContent = 'flex-end'; row.style.marginTop = '18px';
+    row.appendChild(mkBtn('Close', 'accent', close));
+    box.appendChild(row);
+  });
+}
+
 function buildModeButtons(){
   const wrap = el('div', 'col');
   wrap.style.gap = '12px'; wrap.style.minWidth = '380px';
@@ -584,20 +644,28 @@ function buildModeButtons(){
   };
 
   wrap.appendChild(modeBtn(
-    'CREATIVE', 'Free-form skirmish. Pick your jet, set the enemies, launch instantly.',
-    'accent', () => { exitMenu(); Creative.show(); },
+    'QUICK FLIGHT', 'Falcon vs. two rivals · airborne immediately',
+    'accent quick-flight', launchQuickFlight,
   ));
   wrap.appendChild(modeBtn(
-    'MISSION PLANNER', 'Select enemy aircraft from your saved creations, generate an extreme random operation, and share its portable play code.',
+    'CREATIVE', 'Build a custom skirmish.',
+    '', () => { exitMenu(); Creative.show(); },
+  ));
+  wrap.appendChild(modeBtn(
+    'MISSION PLANNER', 'Generate a randomized operation.',
     'danger', () => { exitMenu(); MissionPlanner.show(); },
   ));
   wrap.appendChild(modeBtn(
-    'CAMPAIGN', 'Earn credits, buy aircraft & wingmen, fly missions, climb the ranks.',
+    'CAMPAIGN', 'Fight the worldwide air war.',
     'gold', () => { exitMenu(); Campaign.show(); },
   ));
   wrap.appendChild(modeBtn(
     'PVP ONLINE', '1v1 · 3v3 · 5v5 · Oceanic Battle',
     '', () => { exitMenu(); Pvp.show(); },
+  ));
+  wrap.appendChild(modeBtn(
+    'HOW TO FLY', 'Visual controls and mission goal.',
+    'ghost', showFlightControls,
   ));
 
   return wrap;

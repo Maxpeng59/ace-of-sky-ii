@@ -16,12 +16,205 @@ export const CAT_COLORS = {
 };
 
 // small mesh DSL ------------------------------------------------------------
+const SURFACE_CACHE = new WeakMap();
+export const AIRFRAME_FINISHES = [
+  { key: 'operational', label: 'Operational gray · matte' },
+  { key: 'stealth', label: 'Stealth coating · low reflect' },
+  { key: 'weathered', label: 'Weathered operational' },
+  { key: 'bare', label: 'Bare / coated metal' },
+  { key: 'composite', label: 'Composite · carbon weave' },
+  { key: 'camo', label: 'Low-vis camouflage' },
+  { key: 'heat', label: 'High-heat / stress tint' },
+];
+const FINISH_SETTINGS = {
+  operational: { metalness: 0.24, roughness: 0.78 },
+  stealth: { metalness: 0.08, roughness: 0.96 },
+  weathered: { metalness: 0.27, roughness: 0.84 },
+  bare: { metalness: 0.84, roughness: 0.38 },
+  composite: { metalness: 0.18, roughness: 0.79 },
+  camo: { metalness: 0.18, roughness: 0.83 },
+  heat: { metalness: 0.62, roughness: 0.54 },
+};
+export function normalizeAirframeFinish(value){
+  return Object.hasOwn(FINISH_SETTINGS, value) ? value : 'operational';
+}
+
+function surfaceKind(THREE, color, opts){
+  if (opts.surface) return opts.surface;
+  if (opts.transparent) return 'glass';
+  const rough = opts.rough ?? 0.5, metal = opts.metal ?? 0.55;
+  const c = new THREE.Color(color);
+  const luminance = c.r * 0.2126 + c.g * 0.7152 + c.b * 0.0722;
+  if (luminance < 0.16 && rough >= 0.72) return 'rubber';
+  if (metal >= 0.78 && rough <= 0.48) return 'brushed';
+  if (rough >= 0.74) return 'cast';
+  return 'painted';
+}
+
+// Tiny reusable surface maps: enough micro-variation for highlights to break up
+// like real paint/steel/rubber, while keeping the web build asset-free and small.
+function surfaceMaps(THREE, kind){
+  let cache = SURFACE_CACHE.get(THREE);
+  if (!cache){ cache = new Map(); SURFACE_CACHE.set(THREE, cache); }
+  if (cache.has(kind)) return cache.get(kind);
+  const S = 128;
+  const makeCanvas = () => { const cv = document.createElement('canvas'); cv.width = cv.height = S; return cv; };
+  const albedo = makeCanvas(), rough = makeCanvas();
+  const ac = albedo.getContext('2d'), rc = rough.getContext('2d');
+  let seed = 0x9e3779b9 ^ kind.split('').reduce((n,ch) => n + ch.charCodeAt(0), 0);
+  const rnd = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return (seed >>> 0) / 4294967296; };
+  const ai = ac.createImageData(S, S), ri = rc.createImageData(S, S);
+  const presets = {
+    painted: { a: 238, an: 10, r: 220, rn: 18, bump: 0.018, repeat: 3 },
+    brushed: { a: 224, an: 8,  r: 168, rn: 22, bump: 0.012, repeat: 5 },
+    cast:    { a: 220, an: 24, r: 246, rn: 8,  bump: 0.034, repeat: 4 },
+    rubber:  { a: 205, an: 20, r: 252, rn: 3,  bump: 0.048, repeat: 3 },
+    operational: { a: 228, an: 10, r: 232, rn: 12, bump: 0.014, repeat: 3 },
+    stealth:     { a: 76,  an: 8,  r: 250, rn: 4,  bump: 0.009, repeat: 3 },
+    weathered:   { a: 194, an: 28, r: 242, rn: 16, bump: 0.028, repeat: 3 },
+    bare:        { a: 235, an: 10, r: 180, rn: 20, bump: 0.012, repeat: 4 },
+    composite:   { a: 110, an: 11, r: 225, rn: 10, bump: 0.018, repeat: 5 },
+    camo:        { a: 205, an: 9,  r: 238, rn: 8,  bump: 0.012, repeat: 2 },
+    heat:        { a: 220, an: 12, r: 205, rn: 25, bump: 0.025, repeat: 3 },
+  };
+  const p = presets[kind] || presets.painted;
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++){
+    const i = (y * S + x) * 4;
+    let grain = (rnd() - .5) * 2;
+    if (kind === 'brushed' || kind === 'bare') grain = Math.sin(y * 1.8) * .28 + (rnd() - .5) * .72;
+    if (kind === 'rubber') grain += Math.sin((x + y) * .42) * .35;
+    if (kind === 'weathered') grain += Math.sin(x * .14 + Math.sin(y * .09) * 2) * .4 + Math.cos(y * .1) * .25;
+    if (kind === 'composite') grain += ((x + y) % 8 < 4 ? .5 : -.5) * ((x - y + S * 8) % 8 < 4 ? .55 : -.55);
+    const av = Math.max(0, Math.min(255, p.a + grain * p.an));
+    const rv = Math.max(0, Math.min(255, p.r + (rnd() - .5) * 2 * p.rn));
+    if (kind === 'heat'){
+      const band = Math.sin(y / S * Math.PI * 4 + Math.sin(x / S * Math.PI * 2) * 1.3);
+      ai.data[i] = Math.min(255, av + band * 15);
+      ai.data[i+1] = Math.max(0, av - 6 - band * 7);
+      ai.data[i+2] = Math.min(255, av + 5 - band * 21);
+    } else ai.data[i] = ai.data[i+1] = ai.data[i+2] = av;
+    ai.data[i+3] = 255;
+    ri.data[i] = ri.data[i+1] = ri.data[i+2] = rv; ri.data[i+3] = 255;
+  }
+  ac.putImageData(ai, 0, 0); rc.putImageData(ri, 0, 0);
+  // Directional machining marks, paint scratches/chips, or molded rubber tread.
+  if (kind === 'brushed' || kind === 'bare'){
+    ac.globalAlpha = .18; ac.strokeStyle = '#fff'; ac.lineWidth = .45;
+    for (let y = 2; y < S; y += 4){ ac.beginPath(); ac.moveTo(0,y + rnd()); ac.lineTo(S,y + rnd()); ac.stroke(); }
+  } else if (kind === 'painted'){
+    ac.lineCap = 'round';
+    for (let i = 0; i < 18; i++){
+      ac.globalAlpha = .08 + rnd() * .12; ac.strokeStyle = rnd() < .65 ? '#fff' : '#333'; ac.lineWidth = .4 + rnd() * .7;
+      const x = rnd()*S, y = rnd()*S; ac.beginPath(); ac.moveTo(x,y); ac.lineTo(x + (rnd()-.5)*25, y + (rnd()-.5)*4); ac.stroke();
+    }
+    ac.globalAlpha = .18; ac.fillStyle = '#596169';
+    for (let i = 0; i < 22; i++){ const r = .35 + rnd() * 1.1; ac.beginPath(); ac.arc(rnd()*S,rnd()*S,r,0,7); ac.fill(); }
+  } else if (kind === 'rubber'){
+    ac.globalAlpha = .12; ac.strokeStyle = '#111'; ac.lineWidth = 2;
+    for (let x = -S; x < S * 2; x += 14){ ac.beginPath(); ac.moveTo(x,0); ac.lineTo(x-S,S); ac.stroke(); }
+  } else if (kind === 'weathered'){
+    for (let i = 0; i < 110; i++){
+      const x = rnd() * S, y = rnd() * S;
+      ac.globalAlpha = .05 + rnd() * .16; ac.strokeStyle = rnd() < .5 ? '#fff' : '#303841';
+      ac.lineWidth = .35 + rnd() * .9; ac.beginPath(); ac.moveTo(x,y); ac.lineTo(x + 4 + rnd() * 32,y + (rnd()-.5)*3); ac.stroke();
+    }
+  } else if (kind === 'composite'){
+    ac.globalAlpha = .2; ac.strokeStyle = '#d2d9df'; ac.lineWidth = 1;
+    for (let x = -S; x < S * 2; x += 8){ ac.beginPath(); ac.moveTo(x,0); ac.lineTo(x+S,S); ac.stroke(); }
+    ac.globalAlpha = .1; ac.strokeStyle = '#111820';
+    for (let x = -S; x < S * 2; x += 8){ ac.beginPath(); ac.moveTo(x,S); ac.lineTo(x+S,0); ac.stroke(); }
+  } else if (kind === 'camo'){
+    for (let i = 0; i < 20; i++){
+      const x = rnd() * S, y = rnd() * S, r = 14 + rnd() * 28;
+      ac.globalAlpha = .28 + rnd() * .2; ac.fillStyle = ['#454e59','#818b96','#c1c7cc'][i % 3];
+      const points = [];
+      for (let j = 0; j < 7; j++){
+        const a = j / 7 * Math.PI * 2, rad = r * (.7 + rnd() * .45);
+        points.push([Math.cos(a) * rad, Math.sin(a) * rad]);
+      }
+      for (const dx of [-S, 0, S]) for (const dy of [-S, 0, S]){
+        ac.beginPath();
+        points.forEach(([px, py], j) => {
+          if (j === 0) ac.moveTo(x + dx + px, y + dy + py);
+          else ac.lineTo(x + dx + px, y + dy + py);
+        });
+        ac.closePath(); ac.fill();
+      }
+    }
+  }
+  ac.globalAlpha = 1;
+  // So the new finishes remain tileable even after scratches and color noise,
+  // blend matching edge pixels before Three repeats the maps across UVs.
+  if (Object.hasOwn(FINISH_SETTINGS, kind)) for (const ctx of [ac, rc]){
+    const pixels = ctx.getImageData(0, 0, S, S);
+    const data = pixels.data, margin = 8;
+    for (let y = 0; y < S; y++) for (let x = 0; x < margin; x++){
+      const a = (y * S + x) * 4, b = (y * S + S - 1 - x) * 4;
+      const mix = (margin - x) / margin;
+      for (let c = 0; c < 3; c++){
+        const mid = (data[a + c] + data[b + c]) * .5;
+        data[a + c] += (mid - data[a + c]) * mix;
+        data[b + c] += (mid - data[b + c]) * mix;
+      }
+    }
+    for (let x = 0; x < S; x++) for (let y = 0; y < margin; y++){
+      const a = (y * S + x) * 4, b = ((S - 1 - y) * S + x) * 4;
+      const mix = (margin - y) / margin;
+      for (let c = 0; c < 3; c++){
+        const mid = (data[a + c] + data[b + c]) * .5;
+        data[a + c] += (mid - data[a + c]) * mix;
+        data[b + c] += (mid - data[b + c]) * mix;
+      }
+    }
+    ctx.putImageData(pixels, 0, 0);
+  }
+  const map = new THREE.CanvasTexture(albedo), roughnessMap = new THREE.CanvasTexture(rough);
+  for (const tex of [map, roughnessMap]){
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(p.repeat, p.repeat);
+    tex.anisotropy = 4;
+    tex.userData.aosSharedSurface = true;
+  }
+  if ('colorSpace' in map) map.colorSpace = THREE.SRGBColorSpace;
+  const out = { map, roughnessMap, bumpMap: map, bumpScale: p.bump };
+  cache.set(kind, out);
+  return out;
+}
+
 function mat(THREE, color, opts = {}){
-  return new THREE.MeshStandardMaterial({
+  const kind = surfaceKind(THREE, color, opts);
+  const isGlass = kind === 'glass';
+  const Material = isGlass && THREE.MeshPhysicalMaterial ? THREE.MeshPhysicalMaterial : THREE.MeshStandardMaterial;
+  const material = new Material({
     color, metalness: opts.metal ?? 0.55, roughness: opts.rough ?? 0.5,
     emissive: opts.emissive || 0x000000, emissiveIntensity: opts.ei || 1,
     transparent: opts.transparent || false, opacity: opts.opacity ?? 1,
+    ...(isGlass ? { transmission: 0.22, thickness: 0.08, ior: 1.46, clearcoat: 1, clearcoatRoughness: 0.06, envMapIntensity: 1.15 } : {}),
   });
+  material.userData.aosSurface = kind;
+  material.userData.aosFixedSurface = opts.surface === 'heat' || opts.surface === 'composite';
+  if (!isGlass && !opts.emissive){
+    const maps = surfaceMaps(THREE, kind);
+    material.map = maps.map;
+    material.roughnessMap = maps.roughnessMap;
+    material.bumpMap = maps.bumpMap;
+    material.bumpScale = maps.bumpScale;
+  }
+  return material;
+}
+export function applyAirframeFinish(THREE, material, finish, color){
+  if (!material || material.transparent || material.userData?.aosFixedSurface || material.emissive?.getHex() || material.userData?.aosSurface === 'rubber') return;
+  const kind = normalizeAirframeFinish(finish);
+  const maps = surfaceMaps(THREE, kind);
+  material.color.set(color);
+  material.metalness = FINISH_SETTINGS[kind].metalness;
+  material.roughness = FINISH_SETTINGS[kind].roughness;
+  material.map = maps.map;
+  material.roughnessMap = maps.roughnessMap;
+  material.bumpMap = maps.bumpMap;
+  material.bumpScale = maps.bumpScale;
+  material.userData.aosFinish = kind;
+  material.needsUpdate = true;
 }
 function box(THREE, w, h, l, color, opts){ const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, l), mat(THREE, color, opts)); return m; }
 // rounder default geometry (22 sides) so cylinders/cones read as smooth metal
@@ -41,7 +234,7 @@ function bell(THREE, rThroat, rExit, h, color, opts){
   for (let i = 0; i <= N; i++){ const t = i / N, r = rThroat + (rExit - rThroat) * Math.pow(t, 1.85), y = h * 0.5 - t * h;
     prof.push(new THREE.Vector2(Math.max(0.001, r), y)); iprof.push(new THREE.Vector2(Math.max(0.001, r * 0.9), y)); }
   const seg = opts?.seg || 28;
-  const outer = new THREE.Mesh(new THREE.LatheGeometry(prof, seg), mat(THREE, color, { metal: 0.85, rough: 0.4 })); outer.rotation.x = Math.PI / 2; outer.material.side = THREE.DoubleSide; g.add(outer);
+  const outer = new THREE.Mesh(new THREE.LatheGeometry(prof, seg), mat(THREE, color, { metal: 0.7, rough: 0.5, surface: 'heat' })); outer.rotation.x = Math.PI / 2; outer.material.side = THREE.DoubleSide; g.add(outer);
   const inner = new THREE.Mesh(new THREE.LatheGeometry(iprof, seg), mat(THREE, '#180b05', { metal: 0.5, rough: 0.7, emissive: opts?.hot || 0x140802, ei: 1 })); inner.rotation.x = Math.PI / 2; inner.material.side = THREE.BackSide; g.add(inner);
   // throat cap — LatheGeometry leaves both ends open, so the narrow forward throat
   // is a hole you can see straight through. Seal it with a small emissive disc.
@@ -194,32 +387,32 @@ const LIST = [
     build: (T, d) => a_armor(T, d, { color: '#aeb9c4', thick: 0.18 }) },
 
   // ---------------- GUNS ----------------
-  { key: 'gun_mg', name: 'Machine Gun', category: 'gun', size: [1, 1, 2], mass: 80, cost: 300, hp: 20, weapon: 'mg', ammo: 1200, heatGen: 20000, drag: 0.04,
+  { key: 'gun_mg', name: 'Machine Gun', category: 'gun', size: [1, 1, 2], mass: 60, cost: 300, hp: 20, weapon: 'mg', ammo: 1200, heatGen: 20000, drag: 0.04,
     desc: 'Rapid 14-dmg rounds. High rate of fire, low per-hit damage.',
     build: (T, d) => buildGun(T, d, 0.06) },
-  { key: 'gun_cannon', name: 'Auto-Cannon', category: 'gun', size: [1, 1, 2], mass: 180, cost: 700, hp: 25, weapon: 'cannon', ammo: 200, heatGen: 30000, drag: 0.05,
+  { key: 'gun_cannon', name: 'Auto-Cannon', category: 'gun', size: [1, 1, 2], mass: 130, cost: 700, hp: 25, weapon: 'cannon', ammo: 200, heatGen: 30000, drag: 0.05,
     desc: 'Hard-hitting 90-dmg shells with small splash. Slower fire.',
     build: (T, d) => buildGun(T, d, 0.1) },
-  { key: 'gun_gatling', name: 'Gatling Cannon', category: 'gun', size: [1, 1, 3], mass: 260, cost: 1200, hp: 30, weapon: 'gatling', ammo: 2000, heatGen: 60000, drag: 0.06,
+  { key: 'gun_gatling', name: 'Gatling Cannon', category: 'gun', size: [1, 1, 3], mass: 185, cost: 1200, hp: 30, weapon: 'gatling', ammo: 2000, heatGen: 60000, drag: 0.06,
     desc: 'Six-barrel storm of fire. Shreds targets but runs hot and heavy.',
     build: (T, d) => buildGatling(T, d, { barrels: 6 }) },
 
   // ---------------- MISSILES ----------------
-  { key: 'missile_ir', name: 'IR Missile Rack', category: 'missile', size: [1, 1, 2], mass: 160, cost: 600, hp: 15, weapon: 'ir', ammo: 2, drag: 0.18,
+  { key: 'missile_ir', name: 'IR Missile Rack', category: 'missile', size: [1, 1, 2], mass: 115, cost: 600, hp: 15, weapon: 'ir', ammo: 2, drag: 0.18,
     desc: 'Heat-seekers. Short lock time, decent damage, can be flared.',
     build: (T, d) => buildMissile(T, d, '#ff4d6d', 2) },
-  { key: 'missile_radar', name: 'Radar Missile Rack', category: 'missile', size: [1, 1, 2], mass: 220, cost: 1100, hp: 15, weapon: 'radar', ammo: 2, drag: 0.22,
+  { key: 'missile_radar', name: 'Radar Missile Rack', category: 'missile', size: [1, 1, 2], mass: 160, cost: 1100, hp: 15, weapon: 'radar', ammo: 2, drag: 0.22,
     desc: 'Long-range radar homing. Needs a radar sensor part to guide.',
     build: (T, d) => buildMissile(T, d, '#ff7d4d', 2, { seeker: 'radar' }) },
-  { key: 'missile_lock', name: 'Lock-On Pod', category: 'missile', size: [1, 1, 2], mass: 240, cost: 900, hp: 15, weapon: 'lockmissile', ammo: 4, drag: 0.2,
+  { key: 'missile_lock', name: 'Lock-On Pod', category: 'missile', size: [1, 1, 2], mass: 175, cost: 900, hp: 15, weapon: 'lockmissile', ammo: 4, drag: 0.2,
     desc: 'Movie-style 3s full lock then auto-fires a hard-turning homer (ported from Gravity Front).',
     build: (T, d) => buildMissile(T, d, '#ff4d6d', 4) },
 
   // ---------------- BOMBS ----------------
-  { key: 'bomb', name: 'Bomb Rack', category: 'bomb', size: [1, 1, 2], mass: 210, cost: 280, hp: 10, weapon: 'bomb', ammo: 2, drag: 0.22,
+  { key: 'bomb', name: 'Bomb Rack', category: 'bomb', size: [1, 1, 2], mass: 150, cost: 280, hp: 10, weapon: 'bomb', ammo: 2, drag: 0.22,
     desc: 'Unguided iron bombs. Big splash on ground and carrier targets.',
     build: (T, d) => buildBomb(T, d, 0.22, 2) },
-  { key: 'bomb_heavy', name: 'Heavy Bomb', category: 'bomb', size: [1, 1, 2], mass: 420, cost: 490, hp: 10, weapon: 'bombheavy', ammo: 1, drag: 0.4,
+  { key: 'bomb_heavy', name: 'Heavy Bomb', category: 'bomb', size: [1, 1, 2], mass: 300, cost: 490, hp: 10, weapon: 'bombheavy', ammo: 1, drag: 0.4,
     desc: 'One massive bomb. Carrier-cracker — heavy and very draggy.',
     build: (T, d) => buildBomb(T, d, 0.34, 1) },
 
@@ -323,63 +516,63 @@ const LIST = [
     build: (T, d) => a_armor(T, d, { style: 'reactive' }) },
 
   // ---------------- GUNS ----------------
-  { key: 'gun_rocketpod', name: 'Rocket Pod', category: 'gun', size: [1, 1, 2], mass: 200, cost: 800, hp: 20, weapon: 'rocketpod', ammo: 28, heatGen: 30000, drag: 0.12,
+  { key: 'gun_rocketpod', name: 'Rocket Pod', category: 'gun', size: [1, 1, 2], mass: 145, cost: 800, hp: 20, weapon: 'rocketpod', ammo: 28, heatGen: 30000, drag: 0.12,
     desc: 'Pod of unguided rockets. A fast salvo of splash-damage shots — murder on bombers, ground and carriers.',
     build: (T, d) => buildRocketPod(T, d, {}) },
 
   // ---------------- MISSILES ----------------
-  { key: 'missile_aam', name: 'Heavy AAM Rack', category: 'missile', size: [1, 1, 2], mass: 300, cost: 1400, hp: 15, weapon: 'aamheavy', ammo: 2, drag: 0.24,
+  { key: 'missile_aam', name: 'Heavy AAM Rack', category: 'missile', size: [1, 1, 2], mass: 215, cost: 1400, hp: 15, weapon: 'aamheavy', ammo: 2, drag: 0.24,
     desc: 'Long-reach heat-seeker. Hits hard from far out with a big warhead — fewer shots, heavier punch.',
     build: (T, d) => buildMissile(T, d, '#ff6a4d', 1, { seeker: 'aam' }) },
 
   // ---------------- BOMBS ----------------
-  { key: 'bomb_cluster', name: 'Cluster Bomb', category: 'bomb', size: [1, 1, 2], mass: 315, cost: 455, hp: 10, weapon: 'clusterbomb', ammo: 2, drag: 0.3,
+  { key: 'bomb_cluster', name: 'Cluster Bomb', category: 'bomb', size: [1, 1, 2], mass: 225, cost: 455, hp: 10, weapon: 'clusterbomb', ammo: 2, drag: 0.3,
     desc: 'Wide-area submunitions. Saturates a big radius — ideal against soft and clustered targets.',
     build: (T, d) => buildBomb(T, d, 0.2, 2) },
 
   // ====================== EXTENDED ARSENAL (bespoke models) ==================
   // ---------------- GUNS ----------------
-  { key: 'gun_heavymg', name: 'Heavy Machine Gun', category: 'gun', size: [1, 1, 2], mass: 110, cost: 420, hp: 22, weapon: 'heavymg', ammo: 800, heatGen: 26000, drag: 0.04,
+  { key: 'gun_heavymg', name: 'Heavy Machine Gun', category: 'gun', size: [1, 1, 2], mass: 80, cost: 420, hp: 22, weapon: 'heavymg', ammo: 800, heatGen: 26000, drag: 0.04,
     desc: 'Big-bore .50-class autogun. A water-jacketed barrel that bites harder than the rifle MG, fed from a side ammo can.',
     build: (T, d) => buildHeavyMG(T, d) },
-  { key: 'gun_lightcannon', name: 'Light Auto-Cannon', category: 'gun', size: [1, 1, 2], mass: 150, cost: 560, hp: 24, weapon: 'lightcannon', ammo: 350, heatGen: 28000, drag: 0.05,
+  { key: 'gun_lightcannon', name: 'Light Auto-Cannon', category: 'gun', size: [1, 1, 2], mass: 110, cost: 560, hp: 24, weapon: 'lightcannon', ammo: 350, heatGen: 28000, drag: 0.05,
     desc: 'Fast-cycling 20 mm autocannon. Slim, accurate and drum-fed with a touch of HE splash — the bridge between MG and cannon.',
     build: (T, d) => buildLightCannon(T, d) },
-  { key: 'gun_revolver', name: 'Revolver Cannon', category: 'gun', size: [1, 1, 3], mass: 230, cost: 980, hp: 28, weapon: 'revolver', ammo: 360, heatGen: 42000, drag: 0.05,
+  { key: 'gun_revolver', name: 'Revolver Cannon', category: 'gun', size: [1, 1, 3], mass: 165, cost: 980, hp: 28, weapon: 'revolver', ammo: 360, heatGen: 42000, drag: 0.05,
     desc: 'Five-chamber revolver cannon. Slow cyclic rate but a brutal 130-dmg single-shot punch and pinpoint grouping.',
     build: (T, d) => buildRevolverCannon(T, d) },
-  { key: 'gun_minigun', name: 'Light Minigun', category: 'gun', size: [1, 1, 2], mass: 110, cost: 620, hp: 20, weapon: 'minigun', ammo: 2400, heatGen: 30000, drag: 0.05,
+  { key: 'gun_minigun', name: 'Light Minigun', category: 'gun', size: [1, 1, 2], mass: 80, cost: 620, hp: 20, weapon: 'minigun', ammo: 2400, heatGen: 30000, drag: 0.05,
     desc: 'Compact three-barrel electric rotary. A blistering, wide stream of light rounds — lighter and cooler than a full gatling.',
     build: (T, d) => buildGatling(T, d, { barrels: 3 }) },
-  { key: 'gun_flak', name: 'Flak Cannon', category: 'gun', size: [1, 1, 3], mass: 260, cost: 1050, hp: 30, weapon: 'flak', ammo: 150, heatGen: 44000, drag: 0.07,
+  { key: 'gun_flak', name: 'Flak Cannon', category: 'gun', size: [1, 1, 3], mass: 185, cost: 1050, hp: 30, weapon: 'flak', ammo: 150, heatGen: 44000, drag: 0.07,
     desc: 'Large-bore proximity-fuzed AAA. Modest direct hits but the biggest gun-splash there is — made to break up bomber formations.',
     build: (T, d) => buildFlak(T, d) },
-  { key: 'gun_railgun', name: 'Electromagnetic Railgun', category: 'gun', size: [1, 1, 4], mass: 360, cost: 2200, hp: 30, weapon: 'railgun', ammo: 40, heatGen: 90000, drag: 0.06,
+  { key: 'gun_railgun', name: 'Electromagnetic Railgun', category: 'gun', size: [1, 1, 4], mass: 260, cost: 2200, hp: 30, weapon: 'railgun', ammo: 40, heatGen: 90000, drag: 0.06,
     desc: 'Capacitor-fed coilgun. A tungsten slug at hypervelocity on a dead-flat path — highest speed and per-hit punch of any gun, but slow and blistering hot.',
     build: (T, d) => buildRailgun(T, d) },
 
   // ---------------- MISSILES ----------------
-  { key: 'missile_sraam', name: 'Short-Range AAM Rail', category: 'missile', size: [1, 1, 2], mass: 150, cost: 560, hp: 15, weapon: 'sraam', ammo: 2, drag: 0.17,
+  { key: 'missile_sraam', name: 'Short-Range AAM Rail', category: 'missile', size: [1, 1, 2], mass: 110, cost: 560, hp: 15, weapon: 'sraam', ammo: 2, drag: 0.17,
     desc: 'Twin high-agility dogfight heat-seekers. Snap lock and a hard-turning tail — built for the knife fight.',
     build: (T, d) => buildSRAAM(T, d) },
-  { key: 'missile_lraam', name: 'Long-Range AAM Rail', category: 'missile', size: [1, 1, 3], mass: 280, cost: 1500, hp: 16, weapon: 'lraam', ammo: 2, sensor: 1, drag: 0.24,
+  { key: 'missile_lraam', name: 'Long-Range AAM Rail', category: 'missile', size: [1, 1, 3], mass: 200, cost: 1500, hp: 16, weapon: 'lraam', ammo: 2, sensor: 1, drag: 0.24,
     desc: 'Twin long-burn active-radar missiles. Opens the fight from outside gun range; carries its own radar to self-cue.',
     build: (T, d) => buildLRAAM(T, d) },
-  { key: 'missile_antiship', name: 'Anti-Ship Missile Rail', category: 'missile', size: [2, 1, 3], mass: 420, cost: 1900, hp: 18, weapon: 'antiship', ammo: 2, drag: 0.3,
+  { key: 'missile_antiship', name: 'Anti-Ship Missile Rail', category: 'missile', size: [2, 1, 3], mass: 300, cost: 1900, hp: 18, weapon: 'antiship', ammo: 2, drag: 0.3,
     desc: 'A pair of heavy sea-skimmers with cropped wings and a belly intake — built to gut warships in one hit.',
     build: (T, d) => buildAntiShip(T, d) },
-  { key: 'missile_torpedo', name: 'Aerial Torpedo Cradle', category: 'missile', size: [2, 1, 3], mass: 480, cost: 2000, hp: 18, weapon: 'torpedo', ammo: 1, drag: 0.32,
+  { key: 'missile_torpedo', name: 'Aerial Torpedo Cradle', category: 'missile', size: [2, 1, 3], mass: 345, cost: 2000, hp: 18, weapon: 'torpedo', ammo: 1, drag: 0.32,
     desc: 'A single heavy aerial torpedo in a drop cradle. Fat, blunt and slow, with a ducted ring tail — the deliberate ship-killer.',
     build: (T, d) => buildTorpedo(T, d) },
-  { key: 'missile_cruise', name: 'Cruise Missile Pylon', category: 'missile', size: [2, 1, 4], mass: 520, cost: 2400, hp: 18, weapon: 'cruise', ammo: 1, sensor: 1, drag: 0.34,
+  { key: 'missile_cruise', name: 'Cruise Missile Pylon', category: 'missile', size: [2, 1, 4], mass: 375, cost: 2400, hp: 18, weapon: 'cruise', ammo: 1, sensor: 1, drag: 0.34,
     desc: 'A single long-range stand-off cruise missile: pop-out wings and a tucked turbofan intake behind a heavy unitary warhead.',
     build: (T, d) => buildCruise(T, d) },
 
   // ---------------- BOMBS ----------------
-  { key: 'bomb_guided', name: 'Guided Bomb Rack', category: 'bomb', size: [1, 1, 2], mass: 266, cost: 574, hp: 10, weapon: 'guidedbomb', ammo: 1, drag: 0.26,
+  { key: 'bomb_guided', name: 'Guided Bomb Rack', category: 'bomb', size: [1, 1, 2], mass: 190, cost: 574, hp: 10, weapon: 'guidedbomb', ammo: 1, drag: 0.26,
     desc: 'A single precision glide bomb. A seeker nose and pop-out canards walk it onto a pinpoint aimpoint.',
     build: (T, d) => buildGuidedBomb(T, d) },
-  { key: 'bomb_napalm', name: 'Incendiary Bomb Rack', category: 'bomb', size: [1, 1, 2], mass: 245, cost: 364, hp: 10, weapon: 'napalm', ammo: 2, drag: 0.28,
+  { key: 'bomb_napalm', name: 'Incendiary Bomb Rack', category: 'bomb', size: [1, 1, 2], mass: 175, cost: 364, hp: 10, weapon: 'napalm', ammo: 2, drag: 0.28,
     desc: 'A pair of finless firebombs. Low per-hit damage but the widest area soak in the game — washes the deck in flame.',
     build: (T, d) => buildNapalm(T, d) },
 
@@ -783,8 +976,8 @@ function buildJet(T, d, o = {}){
   // rear: turbine exhaust — short taper to a small dark nozzle. Afterburning jets
   // (o.ab, or any part with an afterburner multiplier) grow a reheat can + brighter flame.
   const ab = o.ab || (d && d.afterburner >= 1.4);
-  const tail = cylZ(T, R * 0.9, R * 0.56, L * 0.14, '#33373d', { metal: 0.72, rough: 0.45 }); tail.position.z = -L * 0.45; g.add(tail);
-  if (ab){ const can = cylZ(T, R * 0.62, R * 0.58, L * 0.14, '#2a2d33', { metal: 0.72, rough: 0.4 }); can.position.z = -L * 0.55; g.add(can);
+  const tail = cylZ(T, R * 0.9, R * 0.56, L * 0.14, '#666a73', { metal: 0.72, rough: 0.45, surface: 'heat' }); tail.position.z = -L * 0.45; g.add(tail);
+  if (ab){ const can = cylZ(T, R * 0.62, R * 0.58, L * 0.14, '#555865', { metal: 0.72, rough: 0.4, surface: 'heat' }); can.position.z = -L * 0.55; g.add(can);
     const ring = ringZ(T, R * 0.58, R * 0.05, '#1c1f24', { metal: 0.7 }); ring.position.z = -L * 0.58; g.add(ring); }
   else { const ring = ringZ(T, R * 0.56, R * 0.045, '#23262b', { metal: 0.7 }); ring.position.z = -L * 0.52; g.add(ring); }
   const exh = cylZ(T, R * 0.5, R * 0.5, 0.02, '#160b06', { emissive: o.hot ?? 0x3a1206, ei: 1 }); exh.position.z = -L * (ab ? 0.6 : 0.51); g.add(exh);
@@ -1058,7 +1251,7 @@ function a_engineRadial(T, d, o = {}){ const s = D(d.size); const R = Rof(s) * 0
   const glow = glowZ(T, R * 0.5, o.glow || '#ffcaa0', 2); glow.position.z = -s[2] * 0.46; g.add(glow); return g; }
 function a_engineAerospike(T, d, o = {}){ const s = D(d.size); const R = Rof(s); const g = new T.Group();
   g.add(cylZ(T, R, R * 0.9, s[2] * 0.4, o.color || '#b85a32', { metal: 0.6 }));
-  const spike = cone(T, R * 0.75, s[2] * 0.6, '#2a2a2c', { metal: 0.85 }); spike.rotation.x = -Math.PI / 2; spike.position.z = -s[2] * 0.34; g.add(spike);
+  const spike = cone(T, R * 0.75, s[2] * 0.6, '#61616b', { metal: 0.7, rough: 0.48, surface: 'heat' }); spike.rotation.x = -Math.PI / 2; spike.position.z = -s[2] * 0.34; g.add(spike);
   const glow = glowZ(T, R * 0.7, o.glow || '#ffcaa0', 2.2); glow.position.z = -s[2] * 0.18; g.add(glow); return g; }
 // SMALL vernier/vectoring thruster — a compact gimbaled nozzle, NOT an engine bell.
 // Vectoring / vernier thruster: a mount collar, a gimbal ball joint and a clean
@@ -1210,7 +1403,7 @@ function a_radiator(T, d, o = {}){ const s = D(d.size); const g = new T.Group();
     fin.position.z = (i / (N - 1) - 0.5) * s[2] * 0.82; g.add(fin); }
   return g; }
 function a_heatShield(T, d, o = {}){ const s = D(d.size); const R = Rof(s); const g = new T.Group();
-  const dome = new T.Mesh(new T.SphereGeometry(R * 1.6, 20, 10, 0, Math.PI * 2, 0, Math.PI * 0.32), mat(T, o.color || '#6b5240', { metal: 0.2, rough: 0.85 })); dome.rotation.x = Math.PI / 2; dome.position.z = s[2] * 0.2; g.add(dome);
+  const dome = new T.Mesh(new T.SphereGeometry(R * 1.6, 20, 10, 0, Math.PI * 2, 0, Math.PI * 0.32), mat(T, o.color || '#938780', { metal: 0.4, rough: 0.72, surface: 'heat' })); dome.rotation.x = Math.PI / 2; dome.position.z = s[2] * 0.2; g.add(dome);
   g.add(cylZ(T, R, R, s[2] * 0.3, '#3a3d42', { metal: 0.6 })); return g; }
 function a_parachute(T, d, o = {}){ const s = D(d.size); const R = Rof(s) * 0.8; const g = new T.Group();
   g.add(cylZ(T, R, R * 0.85, s[2] * 0.8, o.color || '#cfd6dd', { metal: 0.5 }));
@@ -1231,7 +1424,8 @@ function a_armor(T, d, o = {}){ const s = D(d.size); const g = new T.Group();
   const W = s[0], H = s[1], L = s[2];
   const reactive = o.style === 'reactive';
   const col = o.color || (reactive ? '#6f5a52' : '#5f6973');
-  const steel = { metal: 0.5, rough: 0.55 }, edge = { metal: 0.62, rough: 0.42 };
+  const composite = /carbon|composite/.test(d.key || '');
+  const steel = composite ? { metal: 0.18, rough: 0.74, surface: 'composite' } : { metal: 0.5, rough: 0.55 }, edge = { metal: 0.62, rough: 0.42 };
   const longer = Math.max(W, L), shorter = Math.min(W, L), half = shorter * 0.5;
   const t = Math.max(0.12, Math.min(0.34, (o.thick || 0.8) * 0.24)) * H;      // plate thickness
   const theta = 10 * Math.PI / 180;                                           // the 10° fold per side
