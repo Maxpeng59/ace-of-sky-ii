@@ -571,7 +571,7 @@ function buildLibrarySection(){
 // ---------------------------------------------------------------------------
 function launchQuickFlight(){
   const stock = core.stockGet('stock_falcon') || STOCK_DESIGNS[0];
-  if (!stock){ toast('Quick Flight is unavailable.', 'bad'); return; }
+  if (!stock){ toast('Tutorial is unavailable.', 'bad'); return; }
   const player = core.cloneDesign(stock, '');
   player.author = 'You';
   const enemy = core.cloneDesign(stock, '');
@@ -591,8 +591,8 @@ function launchQuickFlight(){
       onEnd: () => Menu.show(),
     });
   } catch (err){
-    console.error('Quick Flight failed', err);
-    toast('Could not launch Quick Flight.', 'bad');
+    console.error('Tutorial failed', err);
+    toast('Could not launch Tutorial.', 'bad');
     Menu.show();
   }
 }
@@ -638,14 +638,20 @@ function buildModeButtons(){
     b.style.gap = '4px'; b.style.padding = '18px 22px'; b.style.textAlign = 'left';
     const t = el('div', '', title); t.style.fontWeight = '800'; t.style.fontSize = '19px'; t.style.letterSpacing = '.04em';
     b.appendChild(t);
-    const d = el('div', 'small', desc); d.style.opacity = '.85'; d.style.fontWeight = '400';
-    b.appendChild(d);
+    if (desc){
+      const d = el('div', 'small', desc); d.style.opacity = '.85'; d.style.fontWeight = '400';
+      b.appendChild(d);
+    }
     return clickable(b, fn);
   };
 
   wrap.appendChild(modeBtn(
-    'QUICK FLIGHT', 'Falcon vs. two rivals · airborne immediately',
+    'TUTORIAL', '',
     'accent quick-flight', launchQuickFlight,
+  ));
+  wrap.appendChild(modeBtn(
+    'INSTANT BATTLE WITH OTHER GAMERS', 'Find available pilots, player counts, and battle types.',
+    'accent', () => { exitMenu(); Pvp.showMatchmaking(); },
   ));
   wrap.appendChild(modeBtn(
     'CREATIVE', 'Build a custom skirmish.',
@@ -699,7 +705,7 @@ export const Menu = {
     root.classList.add('screen');
     // override the centred default — menu uses a top-aligned column layout
     root.classList.remove('center');
-    root.style.position = 'relative';
+    root.style.position = 'fixed';
 
     // decorative drifting starfield behind everything (2D canvas)
     startBackdrop(root);

@@ -22,7 +22,7 @@
 // ============================================================================
 import { $, el, clear, show, hide, toast, sfx, fmtCr, fmtTime, clamp } from './util.js';
 import { State, newDesign, cloneDesign, exportCode, importCode, statsOf, save } from './core.js';
-import { connect, createRoom, joinRoom, checkHealth, OFFICIAL_RELAY_URL } from './net.js';
+import { connect, createRoom, joinRoom, listRooms, checkHealth, OFFICIAL_RELAY_URL } from './net.js';
 import { Hangar } from './hangar.js';
 import { Battle } from './battle.js';
 import { Menu } from './menu.js';
@@ -84,6 +84,7 @@ function makeSession(){
     peerFleetCodes: [],                      // received from peer
     peerFleetMeta: [],                       // [{name, cost}] for display
     status: '',                              // lobby status line
+    autoMatch: false,
   };
 }
 
@@ -101,12 +102,22 @@ export const Pvp = {
     renderPhase();
   },
   openFromPlatform(params){ openFromPlatform(params); },
+  showMatchmaking(){
+    if (session) cleanupSession();
+    matchmakingRooms = [];
+    matchmakingError = '';
+    session = makeSession();
+    session.phase = 'matchmaking';
+    Pvp.show();
+    void refreshMatchmaking();
+  },
 };
 
 function openFromPlatform(params = {}){
   if (session) cleanupSession();
   Battle.stop();
   session = makeSession();
+  session.autoMatch = !!params.autoMatch;
   if (PVP_MODES.some(m => m.id === params.mode)) session.mode = params.mode;
   session.budget = modeDef().budget;
   Pvp.show();
@@ -238,9 +249,64 @@ function renderPhase(){
   if (!root || !session) return;
   clear(root);
   if (session.phase === 'setup') renderSetup();
+  else if (session.phase === 'matchmaking') renderMatchmaking();
   else if (session.phase === 'design') renderDesign();
   else if (session.phase === 'lobby') renderLobby();
   // 'match' hands off to Battle which owns the screen; nothing to render here.
+}
+
+let matchmakingRooms = [];
+let matchmakingError = '';
+async function refreshMatchmaking(){
+  const current = session;
+  const result = await listRooms(current.relayUrl);
+  if (session !== current || current.phase !== 'matchmaking') return;
+  matchmakingRooms = result.rooms;
+  matchmakingError = result.ok ? '' : result.error;
+  renderPhase();
+}
+
+function renderMatchmaking(){
+  const wrap = el('div', 'panel');
+  wrap.style.cssText = 'max-width:760px;margin:0 auto;width:100%;';
+  const back = el('button', 'btn small', '◂ MENU');
+  back.onclick = () => exitToMenu();
+  wrap.appendChild(back);
+  wrap.appendChild(el('h2', '', 'INSTANT BATTLE WITH OTHER GAMERS'));
+  wrap.appendChild(el('p', 'small muted', 'Choose a game type, then join available pilots or create a room for others to join.'));
+  const modes = el('div', 'pill-row');
+  for (const mode of PVP_MODES){
+    const waiting = matchmakingRooms.filter(room => room.mode === mode.id).reduce((sum, room) => sum + room.players, 0);
+    const button = el('button', 'pill' + (session.mode === mode.id ? ' sel' : ''), `${mode.label} · ${waiting} waiting`);
+    button.onclick = () => { session.mode = mode.id; session.budget = mode.budget; renderPhase(); };
+    modes.appendChild(button);
+  }
+  wrap.appendChild(modes);
+  const rooms = matchmakingRooms.filter(room => room.mode === session.mode);
+  const pilots = rooms.reduce((sum, room) => sum + room.players, 0);
+  const status = el('div', 'small muted', matchmakingError || `${pilots} pilot${pilots === 1 ? '' : 's'} waiting in ${rooms.length} ${modeDef().label} room${rooms.length === 1 ? '' : 's'}`);
+  status.style.margin = '18px 0 10px'; wrap.appendChild(status);
+  for (const room of rooms){
+    const row = el('div', 'list-row');
+    row.appendChild(el('b', '', `${modeDef().label} · ${room.players}/${room.maxPlayers} pilots`));
+    row.appendChild(el('div', 'spacer'));
+    const join = el('button', 'btn small accent', 'JOIN');
+    join.onclick = () => startQuickMatch(room.room);
+    row.appendChild(join); wrap.appendChild(row);
+  }
+  if (!rooms.length && !matchmakingError) wrap.appendChild(el('div', 'small muted', 'No open rooms for this game type yet. Start one below.'));
+  const actions = el('div', 'row'); actions.style.marginTop = '16px';
+  const refresh = el('button', 'btn small', 'REFRESH PLAYERS');
+  refresh.onclick = () => { status.textContent = 'Checking available pilots…'; void refreshMatchmaking(); };
+  const play = el('button', 'btn accent', rooms.length ? 'JOIN AVAILABLE BATTLE' : 'START BATTLE LOBBY');
+  play.onclick = () => startQuickMatch(rooms[0]?.room || '');
+  actions.appendChild(refresh); actions.appendChild(play); wrap.appendChild(actions);
+  root.appendChild(wrap);
+}
+
+function startQuickMatch(room){
+  const mode = session.mode;
+  openFromPlatform({ room, mode, autoMatch: true });
 }
 
 // ===========================================================================
@@ -795,7 +861,7 @@ function statusDot(label, on, text){
 async function doHost(){
   session.status = 'Creating room…'; renderPhase();
   localStorage.setItem(RELAY_KEY, session.relayUrl);
-  const res = await createRoom(session.relayUrl, modeDef().maxPlayers);
+  const res = await createRoom(session.relayUrl, modeDef().maxPlayers, session.mode);
   if (!res.ok){ toast('Could not create room: ' + res.error, 'bad'); session.status = res.error; renderPhase(); return; }
   session.playerId = res.playerId || 'host'; session.role = session.playerId; session.room = res.room;
   session.peers = res.peers || [session.playerId];
@@ -811,7 +877,13 @@ async function doJoin(code){
   session.status = 'Joining ' + code + '…'; renderPhase();
   localStorage.setItem(RELAY_KEY, session.relayUrl);
   const res = await joinRoom(session.relayUrl, code);
-  if (!res.ok){ toast('Could not join: ' + res.error, 'bad'); session.status = res.error; renderPhase(); return; }
+  if (!res.ok){
+    if (session.autoMatch){
+      session.status = 'That room filled. Creating a new lobby…';
+      return doHost();
+    }
+    toast('Could not join: ' + res.error, 'bad'); session.status = res.error; renderPhase(); return;
+  }
   session.playerId = res.playerId || 'client'; session.role = session.playerId; session.room = res.room;
   session.peers = res.peers || [session.playerId];
   syncSelfProfile();

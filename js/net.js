@@ -59,9 +59,9 @@ async function jfetch(url, opts = {}, timeoutMs = 6000){
 //  Lobby helpers — used by pvp.js BEFORE a live connection exists.
 //  They do a single request and return a plain result.
 // ---------------------------------------------------------------------------
-export async function createRoom(url, maxPlayers = 10){
+export async function createRoom(url, maxPlayers = 10, mode = ''){
   const base = cleanUrl(url);
-  const r = await jfetch(base + '/room', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ maxPlayers }) });
+  const r = await jfetch(base + '/room', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ maxPlayers, mode }) });
   if (r.ok && r.body && r.body.ok) return { ok: true, room: r.body.room, playerId: r.body.playerId || 'host', peers: r.body.peers || ['host'], maxPlayers: r.body.maxPlayers || maxPlayers };
   return { ok: false, error: (r.body && r.body.error) || 'relay unreachable' };
 }
@@ -78,6 +78,11 @@ export async function checkHealth(url){
   const base = cleanUrl(url);
   const r = await jfetch(base + '/health', {}, 4000);
   return !!(r.ok && r.body && r.body.ok);
+}
+export async function listRooms(url){
+  const r = await jfetch(cleanUrl(url) + '/rooms', {}, 4000);
+  if (r.ok && r.body && r.body.ok && Array.isArray(r.body.rooms)) return { ok: true, rooms: r.body.rooms };
+  return { ok: false, rooms: [], error: (r.body && r.body.error) || 'Could not check available rooms' };
 }
 
 // ---------------------------------------------------------------------------

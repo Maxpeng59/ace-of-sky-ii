@@ -8,7 +8,7 @@ const [menu, battle, campaign, css] = await Promise.all([
   readFile(new URL('../css/style.css', import.meta.url), 'utf8'),
 ]);
 
-assert.match(menu, /QUICK FLIGHT/);
+assert.match(menu, /'TUTORIAL', ''/);
 assert.match(menu, /showGuide:\s*true/);
 assert.match(menu, /Shoot down both enemy fighters/);
 assert.match(menu, /HOW TO FLY/);
