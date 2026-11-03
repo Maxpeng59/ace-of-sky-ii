@@ -7,7 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const output = resolve(process.argv[2] || join(root, 'releases', `Ace-of-Sky-II-optimized-${new Date().toISOString().slice(0,10)}.zip`));
+const output = resolve(process.argv[2] || join(root, 'releases', `The-Warwing-Program-optimized-${new Date().toISOString().slice(0,10)}.zip`));
 const basicLaunch = process.argv.includes('--basic-launch');
 if (!output.endsWith('.zip')) throw new Error('Output must be a .zip file');
 if (await access(output).then(() => true, () => false)) throw new Error(`Refusing to overwrite ${output}`);

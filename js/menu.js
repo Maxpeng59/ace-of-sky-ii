@@ -721,7 +721,7 @@ export const Menu = {
     const titleBlock = el('div', 'col');
     titleBlock.style.gap = '2px'; titleBlock.style.marginTop = '6px';
     titleBlock.appendChild(el('div', 'eyebrow', 'Sky superiority · est. MMXXVI'));
-    titleBlock.appendChild(el('h1', 'title', 'ACE OF SKY II'));
+    titleBlock.appendChild(el('h1', 'title', 'THE WARWING PROGRAM'));
     titleBlock.appendChild(el('div', 'subtitle', 'BUILD · ARM · DOGFIGHT — THE BROWSER COMBAT FLIGHT SIM'));
     content.appendChild(titleBlock);
 
@@ -746,7 +746,7 @@ export const Menu = {
     const foot = el('div', 'row');
     foot.style.justifyContent = 'space-between'; foot.style.marginTop = '6px'; foot.style.opacity = '.7';
     foot.appendChild(el('div', 'faint small mono', 'forward = +Z · WASD throttle/roll · mouse aim · Shift boost · Balloon: Q/E lift, P weapon, Space bomb'));
-    foot.appendChild(el('div', 'faint small mono', 'Ace of Sky II'));
+    foot.appendChild(el('div', 'faint small mono', 'The Warwing Program'));
     content.appendChild(foot);
 
     if (State.settings.sfx) sfx('ui', 0.3);

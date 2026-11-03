@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Ace of Sky II — dev server. Caching disabled so code changes always reach the browser.
+# The Warwing Program — dev server. Caching disabled so code changes always reach the browser.
 import http.server
 import os
 import sys
@@ -21,7 +21,7 @@ if __name__ == '__main__':
         print(f'  Stop the other process:  kill $(lsof -tiTCP:{port} -sTCP:LISTEN)\n')
         sys.exit(1)
     print(
-        f'\n  ACE OF SKY II  ·  dev server (caching disabled)'
+        f'\n  THE WARWING PROGRAM  ·  dev server (caching disabled)'
         f'\n  ->  http://localhost:{port}'
         f'\n  Ctrl+C to stop.\n', flush=True)
     try:
