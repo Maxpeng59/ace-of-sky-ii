@@ -65,17 +65,20 @@ function surfaceMaps(THREE, kind){
   const rnd = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return (seed >>> 0) / 4294967296; };
   const ai = ac.createImageData(S, S), ri = rc.createImageData(S, S);
   const presets = {
-    painted: { a: 238, an: 10, r: 220, rn: 18, bump: 0.018, repeat: 3 },
-    brushed: { a: 224, an: 8,  r: 168, rn: 22, bump: 0.012, repeat: 5 },
-    cast:    { a: 220, an: 24, r: 246, rn: 8,  bump: 0.034, repeat: 4 },
-    rubber:  { a: 205, an: 20, r: 252, rn: 3,  bump: 0.048, repeat: 3 },
-    operational: { a: 228, an: 10, r: 232, rn: 12, bump: 0.014, repeat: 3 },
-    stealth:     { a: 76,  an: 8,  r: 250, rn: 4,  bump: 0.009, repeat: 3 },
-    weathered:   { a: 194, an: 28, r: 242, rn: 16, bump: 0.028, repeat: 3 },
-    bare:        { a: 235, an: 10, r: 180, rn: 20, bump: 0.012, repeat: 4 },
-    composite:   { a: 110, an: 11, r: 225, rn: 10, bump: 0.018, repeat: 5 },
-    camo:        { a: 205, an: 9,  r: 238, rn: 8,  bump: 0.012, repeat: 2 },
-    heat:        { a: 220, an: 12, r: 205, rn: 25, bump: 0.025, repeat: 3 },
+    // These heights are in world units. Previous centimetre-scale bump values
+    // made thin airfoils look corrugated and created moire at gameplay camera
+    // distances; aircraft paint should read nearly smooth, with only fine grain.
+    painted: { a: 238, an: 10, r: 220, rn: 18, bump: 0.0007, repeat: 3 },
+    brushed: { a: 224, an: 8,  r: 168, rn: 22, bump: 0.0005, repeat: 5 },
+    cast:    { a: 220, an: 24, r: 246, rn: 8,  bump: 0.0015, repeat: 4 },
+    rubber:  { a: 205, an: 20, r: 252, rn: 3,  bump: 0.0012, repeat: 3 },
+    operational: { a: 228, an: 10, r: 232, rn: 12, bump: 0.0006, repeat: 3 },
+    stealth:     { a: 76,  an: 8,  r: 250, rn: 4,  bump: 0.0004, repeat: 3 },
+    weathered:   { a: 194, an: 28, r: 242, rn: 16, bump: 0.0012, repeat: 3 },
+    bare:        { a: 235, an: 10, r: 180, rn: 20, bump: 0.0005, repeat: 4 },
+    composite:   { a: 110, an: 11, r: 225, rn: 10, bump: 0.0007, repeat: 5 },
+    camo:        { a: 205, an: 9,  r: 238, rn: 8,  bump: 0.0006, repeat: 2 },
+    heat:        { a: 220, an: 12, r: 205, rn: 25, bump: 0.0010, repeat: 3 },
   };
   const p = presets[kind] || presets.painted;
   for (let y = 0; y < S; y++) for (let x = 0; x < S; x++){
