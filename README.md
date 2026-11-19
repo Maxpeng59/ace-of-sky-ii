@@ -23,6 +23,7 @@
 - **1 / 2 / 3** — free flight / hold current heading and pitch / level flight.
 - **4 / 5 / 6** — one left roll / one right roll / a 180° break turn, followed by level-flight recovery. Fixed-wing aircraft only; manual mouse steering or A/D cancels an assist or maneuver. Commands use the aircraft's own handling limits, not instant rotations.
 - The bottom-center navball shows actual heading, pitch and bank (blue sky, amber ground); its green marker shows the velocity direction. The adjacent weapon schematic shows the selected weapon, ready ammunition, reserve and reload state. Combined weapons show **total** ammunition across the group.
+- Enemy bearings appear on the navball independently of the radar: **solid pink diamonds** are ahead, **hollow rim arrows** are behind. The brightest marker is the nearest hostile; **AFT** counts enemies behind you. Aircraft and hostile vessels are both included.
 - Quick Flight starts immediately. After seven seconds of flying, the simulation pauses for a hands-on **Tab** weapon-switch lesson, then resumes on command. **Skip tutorial** is always available; online matches are never paused by onboarding.
 - In the hangar: **click** to place a part, **Shift+drag** to turn the view, **wheel** to zoom, **R / T / Y** to rotate a part.
 - In the hangar: select a non-missile weapon and press **C** to combine every identical unpaired weapon into one simultaneous-fire group. Groups can contain any number of weapons and appear in flight as `Weapon ×N`; press **C** again to separate the group.

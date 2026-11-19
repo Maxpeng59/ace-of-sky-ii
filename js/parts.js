@@ -218,11 +218,47 @@ export function applyAirframeFinish(THREE, material, finish, color){
 }
 function box(THREE, w, h, l, color, opts){ const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, l), mat(THREE, color, opts)); return m; }
 // rounder default geometry (22 sides) so cylinders/cones read as smooth metal
-function cyl(THREE, rt, rb, h, color, opts){ return new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, opts?.seg || 22, 1, opts?.open || false), mat(THREE, color, opts)); }
+function cyl(THREE, rt, rb, h, color, opts){ return new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, opts?.seg || 32, 1, opts?.open || false), mat(THREE, color, opts)); }
 function cylZ(THREE, rt, rb, h, color, opts){ const m = cyl(THREE, rt, rb, h, color, opts); m.rotation.x = Math.PI / 2; return m; }
 function cone(THREE, r, h, color, opts){ return new THREE.Mesh(new THREE.ConeGeometry(r, h, opts?.seg || 22), mat(THREE, color, opts)); }
+// Smooth, closed airfoil loft. NACA 00xx thickness distribution, cosine-spaced
+// chord samples, tapered planform, sweep, and closed root/tip/trailing edges.
+// Shared by every lifting/control surface so the catalog keeps one consistent
+// aerodynamic section instead of deforming a box's disconnected face vertices.
+function airfoilGeometry(T, span, chord, thickness, taper = 0.55, sweep = 0, sections = 18, samples = 28){
+  const geo = new T.BufferGeometry(), vertices = [], indices = [];
+  const rows = sections + 1, cols = samples + 1, half = span * 0.5, halfChord = chord * 0.5;
+  for (let side = 0; side < 2; side++) for (let i = 0; i < rows; i++){
+    const eta = i / sections, xspan = (eta - 0.5) * span, tf = Math.abs(xspan) / half;
+    const localChord = chord * (1 - (1 - taper) * tf), lead = halfChord - sweep * tf;
+    for (let j = 0; j < cols; j++){
+      const u = 0.5 * (1 - Math.cos(Math.PI * j / samples));
+      const yt = 5 * (thickness / chord) * chord * (0.2969 * Math.sqrt(u) - 0.1260 * u - 0.3516 * u*u + 0.2843 * u*u*u - 0.1015 * u*u*u*u);
+      vertices.push(xspan, (side ? -yt : yt), lead - u * localChord);
+    }
+  }
+  const layer = rows * cols;
+  for (let side = 0; side < 2; side++){
+    const base = side * layer;
+    for (let i = 0; i < sections; i++) for (let j = 0; j < samples; j++){
+      const a = base + i*cols+j, b = a+cols, c = b+1, d = a+1;
+      if (side){ indices.push(a,c,b, a,d,c); } else { indices.push(a,b,c, a,c,d); }
+    }
+  }
+  const edge = (a,b,c,d) => { indices.push(a,b,c, a,c,d); };
+  for (let i = 0; i < sections; i++){
+    const la=i*cols, lb=(i+1)*cols, lc=layer+(i+1)*cols, ld=layer+i*cols; edge(la,ld,lc,lb); // leading edge
+    const ta=i*cols+samples, tb=(i+1)*cols+samples, tc=layer+(i+1)*cols+samples, td=layer+i*cols+samples; edge(ta,tb,tc,td); // trailing edge
+  }
+  for (let j = 0; j < samples; j++){
+    edge(j,j+1,layer+j+1,layer+j);
+    const a=sections*cols+j, b=a+1, c=layer+a+1, d=layer+a; edge(a,d,c,b);
+  }
+  geo.setAttribute('position', new T.Float32BufferAttribute(vertices,3)); geo.setIndex(indices);
+  geo.computeVertexNormals(); return geo;
+}
 // a torus banding ring around the Z axis — tank bands, engine collars, intake lips
-function ringZ(THREE, r, tube, color, opts){ const m = new THREE.Mesh(new THREE.TorusGeometry(r, tube, 8, opts?.seg || 24), mat(THREE, color, opts)); return m; }
+function ringZ(THREE, r, tube, color, opts){ const m = new THREE.Mesh(new THREE.TorusGeometry(r, tube, 10, opts?.seg || 32), mat(THREE, color, opts)); return m; }
 // a hemispherical end cap facing +Z (set scaleZ negative side via rotation)
 function capZ(THREE, r, color, opts, back){ const m = new THREE.Mesh(new THREE.SphereGeometry(r, opts?.seg || 20, 12, 0, Math.PI * 2, 0, Math.PI / 2), mat(THREE, color, opts)); m.rotation.x = back ? Math.PI / 2 : -Math.PI / 2; return m; }
 // an engine nozzle bell (frustum flaring rearward) with a dark scorched interior
@@ -305,16 +341,16 @@ const LIST = [
   // ---------------- STRUCTURE ----------------
   { key: 'nose_cone', name: 'Nose Cone', category: 'structure', size: [1, 1, 1], mass: 60, cost: 90, hp: 30, drag: -0.12,
     desc: 'Streamlined nose. Cuts drag — put it at the very front.',
-    build: (T, d) => { const s = D(d.size); const c = cone(T, s[0] * 0.45, s[2], CAT_COLORS.structure, { metal: 0.5 }); c.rotation.x = Math.PI / 2; return c; } },
+    build: (T, d) => a_noseCone(T, d, { style: 'ogive' }) },
   { key: 'fuselage_s', name: 'Fuselage', category: 'structure', size: [1, 1, 2], mass: 120, cost: 120, hp: 60, fuel: 90, drag: 0.12,
     desc: 'Structural body section. Holds a little fuel and ties parts together.',
-    build: (T, d) => { const s = D(d.size); return cylZ(T, s[1] * 0.45, s[1] * 0.45, s[2], CAT_COLORS.structure, { metal: 0.6 }); } },
+    build: (T, d) => { const s = D(d.size); return cylZ(T, s[1] * 0.51, s[1] * 0.51, s[2] * 1.015, CAT_COLORS.structure, { metal: 0.6 }); } },
   { key: 'fuselage_l', name: 'Long Fuselage', category: 'structure', size: [1, 1, 3], mass: 210, cost: 210, hp: 110, fuel: 160, drag: 0.16,
     desc: 'Long structural spine. More integral fuel and hardpoint room.',
-    build: (T, d) => { const s = D(d.size); return cylZ(T, s[1] * 0.46, s[1] * 0.46, s[2], CAT_COLORS.structure, { metal: 0.6 }); } },
+    build: (T, d) => { const s = D(d.size); return cylZ(T, s[1] * 0.51, s[1] * 0.51, s[2] * 1.015, CAT_COLORS.structure, { metal: 0.6 }); } },
   { key: 'tailboom', name: 'Tail Boom', category: 'structure', size: [1, 1, 2], mass: 55, cost: 110, hp: 50, drag: 0.06,
     desc: 'Thin boom to carry tail surfaces aft of the wing.',
-    build: (T, d) => { const s = D(d.size); return cylZ(T, s[1] * 0.25, s[1] * 0.3, s[2], CAT_COLORS.structure, { metal: 0.6 }); } },
+    build: (T, d) => { const s = D(d.size); return cylZ(T, s[1] * 0.28, s[1] * 0.32, s[2] * 1.015, CAT_COLORS.structure, { metal: 0.6 }); } },
 
   // ---------------- FUEL ----------------
   { key: 'fuel_small', name: 'Fuel Tank', category: 'fuel', size: [1, 1, 2], mass: 40, cost: 160, hp: 20, fuel: 320, drag: 0.1,
@@ -1179,8 +1215,13 @@ const Rof = (s) => Math.min(s[0], s[1]) * 0.47;            // body radius that f
 
 // ---- structure / aero ----
 function a_fuselage(T, d, o = {}){ const s = D(d.size); const R = Rof(s) * (o.r || 1); const g = new T.Group();
-  g.add(cylZ(T, R, R, s[2] * 0.98, o.color || CAT_COLORS.structure, { metal: o.metal ?? 0.6, rough: 0.45 }));
-  for (const z of (o.bands || [0.3, -0.3])){ const b = ringZ(T, R * 1.02, 0.02, '#5a626b', { metal: 0.6 }); b.position.z = s[2] * z; g.add(b); } return g; }
+  // Full-length structural shell plus slim overlapping end collars. The collars
+  // cover hairline gaps where tiled fuselage sections meet while reading as real
+  // frame joints instead of enlarging the whole part beyond its build footprint.
+  g.add(cylZ(T, R, R, s[2] * 0.995, o.color || CAT_COLORS.structure, { metal: o.metal ?? 0.6, rough: 0.45 }));
+  for (const z of (o.bands || [0.3, -0.3])){ const b = ringZ(T, R * 1.02, 0.02, '#5a626b', { metal: 0.6 }); b.position.z = s[2] * z; g.add(b); }
+  for (const z of [-1, 1]){ const collar = ringZ(T, R * 1.015, 0.018, '#5a626b', { metal: 0.7, rough: 0.4 }); collar.position.z = z * s[2] * 0.485; g.add(collar); }
+  return g; }
 function a_fuselageFlat(T, d, o = {}){ const s = D(d.size); const g = new T.Group(); const col = o.color || CAT_COLORS.structure;
   g.add(box(T, s[0] * 0.9, s[1] * 0.78, s[2] * 0.98, col, { metal: o.metal ?? 0.55, rough: 0.45 }));
   for (const sx of [-1, 1]){ const ch = cylZ(T, s[1] * 0.39, s[1] * 0.39, s[2] * 0.98, col, { metal: o.metal ?? 0.55 }); ch.position.x = sx * s[0] * 0.45; g.add(ch); } return g; }
@@ -1281,29 +1322,10 @@ function a_reactionWheel(T, d, o = {}){ const s = D(d.size); const R = Rof(s) * 
   const hubRing = ringZ(T, R * 0.46, 0.018, '#3a3f45', { metal: 0.7 }); hubRing.position.z = s[2] * 0.22; g.add(hubRing); return g; }
 
 // ---- wings / control ----
-function a_wing(T, d, o = {}){ const s = D(d.size); const span = s[0], chord = s[2], maxTh = s[1] * (o.thick || 0.18);
-  // A real airfoil, not a flat slab: a chord-segmented box shaped into a NACA-ish
-  // teardrop (rounded leading edge, thickest ~30% back, sharp trailing edge). The
-  // LEADING edge stays straight at +chord/2 across the full span (so a run of wings
-  // tiles flush) and the TRAILING edge tapers toward the tips (full chord at the root).
-  const taper = o.taper ?? 0.55, sweep = o.sweep ?? 0, hl = chord / 2, hw = span / 2;
-  const geo = new T.BoxGeometry(span, maxTh, chord, 8, 1, 12);
-  const pos = geo.attributes.position;
-  for (let i = 0; i < pos.count; i++){
-    const x0 = pos.getX(i), y0 = pos.getY(i), z0 = pos.getZ(i);
-    const tf = hw > 0 ? Math.abs(x0) / hw : 0;
-    const u = Math.min(1, Math.max(0, (hl - z0) / chord));            // 0 = leading edge … 1 = trailing
-    const b = 0.2969 * Math.sqrt(u) - 0.126 * u - 0.3516 * u * u + 0.2843 * u * u * u - 0.1036 * u * u * u * u;
-    const prof = Math.max(0.04, b / 0.1);                             // normalised so it peaks ~1.0
-    pos.setY(i, (y0 >= 0 ? 1 : -1) * maxTh * 0.5 * prof);             // airfoil thickness
-    // scale the chord toward a tapered trailing edge while KEEPING the leading edge at
-    // +hl and preserving the mid-chord vertex spread (so the airfoil survives the taper);
-    // o.sweep>0 shears the whole chord aft toward the tip (swept-wing leading edge).
-    const te = -hl + (1 - taper) * chord * tf;
-    pos.setZ(i, te + (z0 + hl) / chord * (hl - te) - sweep * chord * tf);
-  }
-  pos.needsUpdate = true; geo.computeVertexNormals();
-  return new T.Mesh(geo, mat(T, o.color || CAT_COLORS.wing, { metal: 0.45, rough: 0.5 })); }
+function a_wing(T, d, o = {}){ const s = D(d.size), span = s[0], chord = s[2];
+  const thickness = s[1] * (o.thick || 0.12);
+  const geo = airfoilGeometry(T, span, chord, thickness, o.taper ?? 0.55, o.sweep ?? 0);
+  return new T.Mesh(geo, mat(T, o.color || CAT_COLORS.wing, { metal: 0.28, rough: 0.62 })); }
 function a_ctrlSurface(T, d, o = {}){ const s = D(d.size); const g = new T.Group();
   g.add(a_wing(T, d, { ...o, thick: o.thick || 0.09 }));
   const hinge = box(T, s[0] * 0.98, s[1] * 0.03, 0.04, '#2a3038'); hinge.position.z = -s[2] * 0.3; g.add(hinge); return g; }
@@ -1356,10 +1378,24 @@ function a_cabin(T, d, o = {}){ const s = D(d.size); const R = Rof(s), L = s[2];
   return g; }
 
 // ---- gear / coupling ----
-function a_gear(T, d, o = {}){ const s = D(d.size); const g = new T.Group();
-  g.add(box(T, s[0] * 0.18, s[1] * 0.55, s[2] * 0.18, '#5a626b', { metal: 0.7 }));     // strut
-  const axle = cylZ(T, 0.05, 0.05, s[0] * 0.4, '#444'); axle.rotation.z = Math.PI / 2; axle.position.y = -s[1] * 0.32; g.add(axle);
-  for (const sx of (s[0] > 1.5 ? [-1, 1] : [0])){ const wheel = new T.Mesh(new T.TorusGeometry(s[1] * 0.22, s[1] * 0.1, 10, 16), mat(T, '#1c1d1f', { rough: 0.8 })); wheel.position.set(sx * s[0] * 0.22, -s[1] * 0.32, 0); g.add(wheel); } return g; }
+function a_gear(T, d, o = {}){ const s = D(d.size), g = new T.Group(), dual = s[0] > 1.5;
+  const top = s[1] * 0.24, axleY = -s[1] * 0.29, wheelR = s[1] * 0.18;
+  // Tapered oleo strut, exposed sliding piston and torque-link braces.
+  const outer = cyl(T, s[0] * 0.09, s[0] * 0.065, s[1] * 0.58, '#59636d', { metal: 0.78, rough: 0.38 }); outer.position.y = -s[1] * 0.03; g.add(outer);
+  const piston = cyl(T, s[0] * 0.032, s[0] * 0.032, s[1] * 0.38, '#c0c7cd', { metal: 0.9, rough: 0.24 }); piston.position.y = s[1] * 0.12; g.add(piston);
+  for (const side of [-1,1]){ const link = cyl(T, 0.018, 0.018, s[1] * 0.32, '#48515a', { metal: 0.72 }); link.position.set(side*s[0]*0.1,-s[1]*0.08,0); link.rotation.z=side*0.3; g.add(link); }
+  const xs = dual ? [-s[0]*0.2,s[0]*0.2] : [0];
+  for (const x of xs){
+    const tire = new T.Mesh(new T.TorusGeometry(wheelR, wheelR*0.34, 14, 28), mat(T, '#191b1e', { rough: 0.88 }));
+    tire.rotation.y = Math.PI/2; tire.position.set(x, axleY, 0); g.add(tire);
+    const hub = cyl(T, wheelR*0.55, wheelR*0.55, dual ? s[0]*0.12 : s[0]*0.2, '#9aa3ab', { metal: 0.82, rough: 0.3 });
+    hub.rotation.z=Math.PI/2; hub.position.set(x,axleY,0); g.add(hub);
+    const cap = cyl(T,wheelR*0.22,wheelR*0.22,0.018,'#343a40',{metal:0.75}); cap.rotation.z=Math.PI/2; cap.position.set(x+(dual?0.07:0.1),axleY,0); g.add(cap);
+    // Brake caliper sits on the aft inner quadrant of each wheel.
+    const brake=box(T,wheelR*0.38,wheelR*0.52,wheelR*0.26,'#8d3c32',{metal:0.58}); brake.position.set(x,axleY-wheelR*0.08,-wheelR*0.72); g.add(brake);
+  }
+  const mount = box(T,s[0]*0.34,s[1]*0.08,s[2]*0.24,'#424a52',{metal:0.68}); mount.position.y=top; g.add(mount);
+  return g; }
 function a_wheel(T, d, o = {}){ const s = D(d.size); const r = Math.min(s[0], s[1]) * 0.42; const g = new T.Group();
   const tyre = new T.Mesh(new T.TorusGeometry(r, r * 0.4, 12, 20), mat(T, '#1c1d1f', { rough: 0.85 })); tyre.rotation.y = Math.PI / 2; g.add(tyre);
   const hub = cyl(T, r * 0.5, r * 0.5, s[0] * 0.4, '#8a8f96', { metal: 0.7 }); hub.rotation.z = Math.PI / 2; g.add(hub); return g; }

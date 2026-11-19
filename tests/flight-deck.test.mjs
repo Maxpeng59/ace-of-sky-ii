@@ -4,7 +4,7 @@ import { registerHooks } from 'node:module';
 import * as T from '../vendor/three.module.js';
 import { attitude, localDirection, FlightDirector, canManeuver } from '../js/flight-controls.js';
 import { FlightTutorial } from '../js/flight-tutorial.js';
-import { weaponReadout } from '../js/flight-deck.js';
+import { weaponReadout, navballContacts } from '../js/flight-deck.js';
 
 const near = (a,b) => assert.ok(Math.abs(a-b)<1e-6, `${a} != ${b}`);
 const craft = () => ({ alive:true, group:{ quaternion:new T.Quaternion() }, weapons:[] });
@@ -140,4 +140,55 @@ test('manual roll input cancels the director; clicking HUD controls cannot fire'
   const s=new Sim({net:{}});s.player=craft();s.director.select('hold',s.player);
   s.onKeyDown({key:'a',preventDefault(){}});assert.equal(s.director.mode,'manual');
   s.onMouseDown({button:0,target:{closest:()=>true}});assert.equal(s.mouseFire,false);assert.equal(s.firePulse,undefined);
+});
+
+test('navball plots forward, above, side and rear threats without radar or lock data', () => {
+  const p={...craft(),team:0,pos:new T.Vector3()};
+  const enemy=(x,y,z)=>({alive:true,team:1,pos:{x,y,z}});
+  const [ahead]=navballContacts(p,[enemy(0,0,1000)]);near(ahead.x,0);near(ahead.y,0);assert.equal(ahead.behind,false);
+  const [right]=navballContacts(p,[enemy(1000,0,1000)]);assert.ok(right.x>0);assert.equal(right.behind,false);
+  const [above]=navballContacts(p,[enemy(0,1000,1000)]);assert.ok(above.y<0);
+  const [rear]=navballContacts(p,[enemy(0,0,-1000)]);assert.equal(rear.behind,true);near(rear.x,0);near(rear.y,1);
+  const [aftLeft]=navballContacts(p,[enemy(-100,0,-1000)]);near(aftLeft.x,-1);assert.equal(aftLeft.behind,true);
+  const [far]=navballContacts(p,[enemy(0,0,100000)]);assert.equal(far.distance,100000,'radar range must not hide a bearing');
+});
+
+test('enemy bearings follow the airframe when banked or turned, not the level chase camera', () => {
+  const p={...craft(),team:0,pos:new T.Vector3()},enemy={alive:true,team:1,pos:{x:100,y:0,z:100}};
+  p.group.quaternion.setFromAxisAngle(new T.Vector3(0,0,1),Math.PI/2);
+  const [banked]=navballContacts(p,[enemy]);near(banked.x,0);assert.ok(banked.y>0);
+  p.group.quaternion.setFromAxisAngle(new T.Vector3(0,1,0),Math.PI);
+  const [turned]=navballContacts(p,[enemy]);assert.equal(turned.behind,true);assert.ok(turned.x<0);
+});
+
+test('enemy contacts include ships and remote pilots but exclude allies, dead, invalid and duplicates', () => {
+  const p={...craft(),team:0,pos:new T.Vector3()};
+  const enemy=(z,extra={})=>({alive:true,team:1,pos:{x:0,y:0,z},...extra});
+  const remote=enemy(900,{isRemote:true}),ship=enemy(500,{isCarrier:true});
+  const contacts=navballContacts(p,[p,remote,enemy(100,{team:0}),enemy(200,{alive:false}),enemy(NaN),enemy(0)],[ship,remote]);
+  assert.equal(contacts.length,2);assert.equal(contacts.at(-1).distance,500,'nearest contact draws last');
+  assert.deepEqual(navballContacts(p,[],[]),[],'destroyed contacts must not linger');
+});
+
+test('chase camera stays close at speed and keeps the aircraft above the compact HUD', () => {
+  for(const speed of [0,180,350,600]){
+    const s=new Sim({env:'day'});s.camera=new T.PerspectiveCamera(63,16/9,.5,14000);
+    s.player={...craft(),pos:new T.Vector3(0,360,0),speed,stats:statsOf(stockGet('stock_falcon'))};
+    s.updateCamera(0);
+    for(let i=0;i<600;i++){s.player.pos.z+=speed/60;s.updateCamera(1/60);}
+    const distance=s.player.pos.z-s.camera.position.z;
+    near(distance,19+Math.min(speed*.006,2));near(s.camera.position.y-s.player.pos.y,3.4);
+    s.camera.updateMatrixWorld();const screen=s.player.pos.clone().project(s.camera);
+    const centerY=(-screen.y*.5+.5)*720;
+    assert.ok(centerY<500,`plane center obscured at ${centerY}px`);
+  }
+});
+
+test('returning from bombardment view restores close chase framing immediately', () => {
+  const s=new Sim({env:'day'});s.camera=new T.PerspectiveCamera(63,16/9,.5,14000);
+  s.player={...craft(),pos:new T.Vector3(0,360,0),speed:280,curWeapon:-1};s.updateCamera(0);
+  s.bombView=true;for(let i=0;i<60;i++)s.updateCamera(1/60);
+  assert.ok(s.camera.position.y>650);
+  s.bombView=false;s.updateCamera(1/60);
+  near(s.player.pos.z-s.camera.position.z,20.68);near(s.camera.position.y-s.player.pos.y,3.4);
 });

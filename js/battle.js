@@ -507,6 +507,8 @@ export class Sim {
     // camera state
     this.camPos = new THREE.Vector3();
     this.camLook = new THREE.Vector3();
+    this.cameraPlayerPos = null;
+    this.cameraWasBombView = false;
     this.shake = 0;
     this.bombView = false;                 // V: straight-down bombardment camera + impact prediction
 
@@ -557,11 +559,8 @@ export class Sim {
     this.world.player = this.player;
     this.world.groundY = this.groundY;
 
-    // place chase camera behind the player to start
-    this.camPos.copy(this.player.pos).add(new THREE.Vector3(0, 6, -28));
-    this.camLook.copy(this.player.pos);
-    this.camera.position.copy(this.camPos);
-    this.camera.lookAt(this.camLook);
+    // Use the same close framing on the first frame and throughout the sortie.
+    this.updateCamera(0);
 
     setScene(this.scene, this.camera);
     this.unsubFrame = onFrame((dt) => this.frame(dt));
@@ -3128,7 +3127,14 @@ export class Sim {
   updateCamera(dt){
     const p = this.player;
     if (!p){ return; }
+    const firstFrame = !this.cameraPlayerPos;
+    if (firstFrame) this.cameraPlayerPos = p.pos.clone();
+    // Smooth only the orbit offset, not world-space aircraft travel. At 300 m/s
+    // the old 7 Hz lag added ~40 m to the intended chase distance.
+    if (!this.bombView && !this.cameraWasBombView) this.camPos.add(TMP3.copy(p.pos).sub(this.cameraPlayerPos));
+    this.cameraPlayerPos.copy(p.pos);
     if (this.bombView){
+      this.cameraWasBombView = true;
       const w = p.weapons[p.curWeapon];
       const pred = w && w.type === 'bomb' ? this.predictBombPath(p, w) : null;
       const impact = pred && pred.impact ? pred.impact : p.pos;
@@ -3155,15 +3161,18 @@ export class Sim {
     const cp = Math.cos(cameraPitch), sp = Math.sin(cameraPitch);
     const aimFwd = TMP.set(Math.sin(cameraYaw) * cp, sp, Math.cos(cameraYaw) * cp);
     const cm = (p.scaleMul || 1);                            // a piloted ship sits farther from the eye
-    // Keep the player's aircraft large enough to read as the hero object. The old
-    // 30–46 m dolly made even the detailed Falcon look like a tiny grey speck.
-    const viewBase = p.isShipCraft ? 30 : (p.isBalloon ? 27 : 17);
-    const dollyBack = (viewBase + clamp(p.speed * 0.014, 0, 7)) * cm;
+    const viewBase = p.isShipCraft ? 30 : (p.isBalloon ? 27 : 19);
+    const size = p.stats?.bbox?.size;
+    const fit = size ? Math.hypot(size.x,size.y,size.z)*.62 : 0;
+    const dollyBack = Math.max(viewBase + clamp(p.speed * 0.006, 0, 2), fit) * cm;
     const desired = TMP2.copy(p.pos).addScaledVector(aimFwd, -dollyBack);
-    desired.y += (p.isShipCraft ? 10 : (p.isBalloon ? 8 : 5.7)) * cm;
+    // Keep the now-larger plane above the compact instrument deck.
+    desired.y += (p.isShipCraft ? 10 : (p.isBalloon ? 6 : 3.4)) * cm;
     const surfY = this.surfaceHeight(p.pos.x, p.pos.z);
     if (desired.y < surfY + 6) desired.y = surfY + 6;        // keep the camera above the ground
-    this.camPos.lerp(desired, 1 - Math.exp(-7 * dt));
+    if (firstFrame || this.cameraWasBombView) this.camPos.copy(desired);
+    else this.camPos.lerp(desired, 1 - Math.exp(-7 * dt));
+    this.cameraWasBombView = false;
 
     // shake
     this.shake = Math.max(0, this.shake - dt * 3.5);
@@ -3604,7 +3613,7 @@ export class Sim {
       ctx.restore();
     }
 
-    this.flightDeck?.draw(p, this.time);
+    this.flightDeck?.draw(p, this.time, this.craft, this.carriers);
     // Reticles stay frame-synchronous; telemetry and radar need only 10 Hz.
     if (this._hudNext > this.time && !this.over) return;
     this._hudNext = this.time + 0.1;

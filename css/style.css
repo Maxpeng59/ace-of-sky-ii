@@ -340,7 +340,7 @@ label.field{ display:flex; flex-direction:column; gap:5px; font-size:12px; color
 }
 .hud-warn-tone{ color:var(--bad); animation:blink .6s steps(2) infinite; }
 @keyframes blink{ 50%{ opacity:.3; } }
-.hud-help{ position:absolute; left:50%; bottom:226px; transform:translateX(-50%); white-space:normal;width:max-content;max-width:calc(100vw - 420px);text-align:center;
+.hud-help{ position:absolute; left:50%; bottom:180px; transform:translateX(-50%); white-space:normal;width:max-content;max-width:calc(100vw - 420px);text-align:center;
   font-size:10.5px;letter-spacing:.055em;color:#9bb0c3;
   background:repeating-linear-gradient(92deg,rgba(255,255,255,.018) 0 1px,transparent 1px 4px),rgba(7,11,18,.84);
   border:1px solid #465461;border-top-color:#687580;border-radius:7px;padding:6px 12px;opacity:1;transition:opacity 1.4s;
@@ -349,29 +349,30 @@ label.field{ display:flex; flex-direction:column; gap:5px; font-size:12px; color
 .hud-help.fade{ opacity:0; }
 
 /* Original flight deck: attitude sphere, fixed-wing director, live weapon schematic. */
-.flight-deck{ position:absolute;bottom:14px;left:50%;width:172px;transform:translateX(-50%);z-index:5;color:#d5e5ee; }
+.flight-deck{ position:absolute;bottom:10px;left:50%;width:132px;transform:translateX(-50%);z-index:5;color:#d5e5ee; }
 .navball-shell,.maneuver-panel,.weapon-panel{ background:linear-gradient(135deg,rgba(24,37,47,.96),rgba(5,13,20,.94));border:1px solid #50616e;
   border-top-color:#8c9aa4;border-radius:9px;box-shadow:inset 0 1px 0 #ffffff15,0 8px 24px #0008; }
-.navball-shell{ padding:8px 0 7px;text-align:center;border-radius:16px; }
-.navball-heading{ font-size:10px;color:#93a9ba;letter-spacing:.14em; }.navball-heading b{ color:#eef5f8;font-size:17px;letter-spacing:.08em; }
-.navball-shell canvas{ display:block;width:164px;height:164px;margin:-4px auto -6px; }
-.navball-readout{ font-size:8px;letter-spacing:.01em;color:#bacbd6; }
-.maneuver-panel{ position:absolute;right:calc(100% + 12px);bottom:0;width:170px;padding:11px;pointer-events:auto; }
+.navball-shell{ padding:5px 0 6px;text-align:center;border-radius:12px; }
+.navball-heading{ font-size:9px;color:#93a9ba;letter-spacing:.14em; }.navball-heading b{ color:#eef5f8;font-size:14px;letter-spacing:.08em; }
+.navball-shell canvas{ display:block;width:120px;height:120px;margin:-3px auto -4px; }
+.navball-readout{ font-size:7px;letter-spacing:.01em;color:#bacbd6; }
+.navball-threats{ font-size:8px;line-height:1.5;color:#ff9bac;white-space:nowrap; }
+.maneuver-panel{ position:absolute;right:calc(100% + 10px);bottom:0;width:216px;padding:8px;pointer-events:auto; }
 .instrument-label{ font-size:8px;font-weight:700;letter-spacing:.15em;color:#91adbf;display:flex;justify-content:space-between;gap:5px; }
-.maneuver-buttons{ display:grid;grid-template-columns:1fr 1fr;gap:5px;margin:9px 0; }
+.maneuver-buttons{ display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin:7px 0; }
 .maneuver-buttons button,.weapon-next{ color:#c3d5df;border:1px solid #435969;background:linear-gradient(#253947,#14232e);border-radius:4px;
-  font:9px var(--mono);padding:7px 4px;cursor:pointer;box-shadow:inset 0 1px 0 #ffffff13; }
-.maneuver-buttons button{ display:flex;align-items:center;gap:4px;text-align:left;line-height:1.25; }
+  font:9px var(--mono);padding:5px 3px;cursor:pointer;box-shadow:inset 0 1px 0 #ffffff13; }
+.maneuver-buttons button{ display:flex;align-items:center;gap:3px;text-align:left;line-height:1.2;min-height:34px; }
 .maneuver-buttons button[aria-pressed="true"]{ color:#c2f5ff;border-color:#62cfe9;background:linear-gradient(#25637a,#123949);box-shadow:0 0 8px #53dcff20; }
 .maneuver-buttons button:disabled,.weapon-next:disabled{ opacity:.38;cursor:default; }
 .flight-deck kbd{ font:8px var(--mono);color:#81c7e1;border:1px solid #66839555;border-radius:3px;padding:2px 3px; }
 .director-status{ color:#82a5ba;font-size:8px;letter-spacing:.03em;min-height:11px; }
-.weapon-panel{ position:absolute;left:calc(100% + 12px);bottom:0;width:184px;padding:11px 13px;pointer-events:auto; }
-.weapon-ghost{ height:57px;position:relative;background:repeating-linear-gradient(0deg,transparent 0 9px,#6ac8eb0b 9px 10px); }
+.weapon-panel{ position:absolute;left:calc(100% + 10px);bottom:0;width:210px;padding:10px 12px;pointer-events:auto; }
+.weapon-ghost{ height:58px;position:relative;background:repeating-linear-gradient(0deg,transparent 0 9px,#6ac8eb0b 9px 10px); }
 .weapon-ghost svg{ width:100%;height:100%;fill:#67cce918;stroke:#8ed7ef;stroke-width:1.25;stroke-linejoin:round;filter:drop-shadow(0 0 4px #4bb4f344); }
-.weapon-name{ color:#e0f4ff;font-size:11px;line-height:1.25;min-height:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
-.weapon-ammo{ display:flex;align-items:baseline;gap:7px;margin:3px 0 2px; }.weapon-ammo b{ font-size:26px;font-weight:500;color:#f4d28b;line-height:1; }
-.weapon-ammo span{ font-size:8px;color:#9aaebc;letter-spacing:.08em; }.weapon-reserve{ font-size:8px;color:#9aaebc;min-height:12px; }
+.weapon-name{ color:#e0f4ff;font-size:14px;line-height:1.25;min-height:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.weapon-ammo{ display:flex;align-items:baseline;gap:8px;margin:4px 0 3px; }.weapon-ammo b{ font-size:32px;font-weight:500;color:#f4d28b;line-height:1; }
+.weapon-ammo span{ font-size:10px;color:#9aaebc;letter-spacing:.08em; }.weapon-reserve{ font-size:9px;color:#9aaebc;min-height:13px; }
 .weapon-next{ margin-top:5px;width:100%;display:flex;justify-content:space-between;align-items:center;padding:5px 6px; }
 .reloading .weapon-reserve{ color:#ffd27b; }
 .flight-tutorial-hint{ position:absolute;left:50%;top:104px;transform:translateX(-50%);width:max-content;max-width:75vw;z-index:6;
@@ -415,11 +416,12 @@ label.field{ display:flex; flex-direction:column; gap:5px; font-size:12px; color
 @media(max-width:1100px){
   .hud-bl{ width:165px;left:10px;bottom:12px;padding:7px 9px; }.hud-bar-label{ font-size:9px;margin-top:5px; }.hud-bar{ height:6px; }
   .hud-br{ right:10px;bottom:12px; }.hud-br canvas{ width:132px;height:132px; }
-  .flight-deck{ width:146px; }.navball-shell canvas{ width:142px;height:142px; }.navball-readout{ font-size:7px; }
-  .maneuver-panel{ width:148px;right:calc(100% + 7px);padding:8px; }.weapon-panel{ width:162px;left:calc(100% + 7px);padding:8px; }
+  .flight-deck{ width:126px; }.navball-shell canvas{ width:114px;height:114px; }
+  .maneuver-panel{ width:200px;right:calc(100% + 7px);padding:7px; }.weapon-panel{ width:190px;left:calc(100% + 7px);padding:8px 10px; }
 }
 @media(max-width:850px){
-  .hud-bl{ bottom:215px;width:140px; }.hud-br{ bottom:215px; }.hud-br canvas{ width:110px;height:110px; }
+  .hud-bl{ bottom:185px;width:140px; }.hud-br{ bottom:185px; }.hud-br canvas{ width:110px;height:110px; }
+  .hud-help{ bottom:172px;max-width:90vw;font-size:8px;padding:3px 8px; }
   .hud-tc{ top:10px;min-width:0;width:48%; }.hud-tc .v-obj{ font-size:10px!important; }.hud-tc .v-objsub{ font-size:9px!important; }
   .flight-tutorial-hint{ top:90px;max-width:90vw; }.flight-guide{ padding:12px 12px 205px; }.flight-guide .flight-guide-card{ padding:16px; }
   .flight-guide h2{ font-size:23px;margin-bottom:6px; }.flight-guide p{ font-size:11px;margin:8px 0; }.tutorial-weapon-demo{ padding:8px; }
